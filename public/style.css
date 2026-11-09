@@ -19,7 +19,7 @@ a:hover { text-decoration: underline; }
 nav { display: flex; gap: 14px; flex-wrap: wrap; }
 nav a { color: var(--muted); font-weight: 500; }
 nav a.on { color: var(--ink); }
-#quicksearch { flex: 1; min-width: 180px; }
+#quicksearch { flex: 1; min-width: 180px; position: relative; }
 #quicksearch input { width: 100%; }
 main { max-width: 1100px; margin: 0 auto; padding: 16px; }
 h1 { font-size: 22px; margin: 6px 0 12px; }
@@ -93,3 +93,10 @@ button:disabled { opacity: .6; cursor: default; }
 
 .related-banner { padding: 8px 12px; margin-bottom: 12px; border-left: 3px solid var(--accent, #2f6f4f); }
 .related-banner a { font-weight: 600; }
+
+.qs-drop { position: absolute; left: 0; right: 0; top: calc(100% + 4px); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); z-index: 50; max-height: 70vh; overflow: auto; }
+.qs-drop[hidden] { display: none; }
+.qs-drop a { display: block; padding: 8px 12px; color: var(--ink); border-bottom: 1px solid var(--line); }
+.qs-drop a:last-child { border-bottom: 0; }
+.qs-drop a:hover, .qs-drop a.on { background: var(--chip); }
+.qs-drop .qs-all { color: var(--accent); font-size: 13px; }

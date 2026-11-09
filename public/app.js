@@ -98,9 +98,47 @@ function viewLogin() {
   };
 }
 document.getElementById('signout').onclick = () => sb.auth.signOut();
-document.getElementById('quicksearch').onsubmit = (e) => {
+// quick search with live suggestions (like Highrise)
+const qsForm = document.getElementById('quicksearch'), qsInput = qsForm.querySelector('input');
+const qsBox = document.createElement('div'); qsBox.className = 'qs-drop'; qsBox.hidden = true; qsForm.appendChild(qsBox);
+let qsTimer, qsSeq = 0, qsSel = -1;
+const qsItems = () => [...qsBox.querySelectorAll('a')];
+const qsHi = (i) => { const L = qsItems(); qsSel = Math.max(-1, Math.min(i, L.length - 1)); L.forEach((a, j) => a.classList.toggle('on', j === qsSel)); };
+const qsClose = () => { qsBox.hidden = true; qsSel = -1; };
+qsInput.setAttribute('autocomplete', 'off');
+qsInput.addEventListener('input', () => {
+  clearTimeout(qsTimer); const q = qsInput.value.trim();
+  if (q.length < 2) return qsClose();
+  qsTimer = setTimeout(async () => {
+    const my = ++qsSeq;
+    const [st, ppl] = await Promise.all([
+      sb.from('stores').select('id,name,city,state,archived_at,key_account').or(orIlike(['name', 'city'], q)).order('archived_at', { nullsFirst: true }).order('name').limit(8),
+      sb.from('contacts').select('id,name,email,store_id,stores(name)').or(orIlike(['name', 'email'], q)).limit(4),
+    ]);
+    if (my !== qsSeq || qsInput.value.trim() !== q) return;
+    const rows = [
+      ...(st.data || []).map((x) => `<a href="#/store/${x.id}"><b>${esc(x.name)}</b>${x.key_account ? ' ★' : ''} <span class="muted small">${esc([x.city, x.state].filter(Boolean).join(', '))}${x.archived_at ? ' · archived' : ''}</span></a>`),
+      ...(ppl.data || []).filter((c) => c.store_id).map((c) => `<a href="#/store/${c.store_id}">${esc(c.name || c.email)} <span class="muted small">at ${esc(c.stores?.name || '')}</span></a>`),
+      `<a href="#/search/${encodeURIComponent(q)}" class="qs-all">Search everything for “${esc(q)}” (notes too)</a>`,
+    ];
+    qsBox.innerHTML = rows.join(''); qsBox.hidden = false; qsSel = -1;
+    qsItems().forEach((a) => a.addEventListener('mousedown', (e) => e.preventDefault()));
+    qsItems().forEach((a) => a.addEventListener('click', () => { qsClose(); qsInput.blur(); }));
+  }, 180);
+});
+qsInput.addEventListener('keydown', (e) => {
+  if (qsBox.hidden) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); qsHi(qsSel + 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); qsHi(qsSel - 1); }
+  else if (e.key === 'Escape') qsClose();
+});
+qsInput.addEventListener('blur', () => setTimeout(qsClose, 150));
+qsForm.onsubmit = (e) => {
   e.preventDefault();
-  const q = e.target.querySelector('input').value.trim();
+  const pick = qsItems()[qsSel];
+  if (!qsBox.hidden && pick) { location.hash = pick.getAttribute('href'); qsClose(); qsInput.blur(); return; }
+  qsClose();
+  const q = qsInput.value.trim();
   if (q) location.hash = '#/search/' + encodeURIComponent(q);
 };
 sb.auth.onAuthStateChange((_ev, session) => {
