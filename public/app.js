@@ -11,6 +11,18 @@ const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in loc
 const fmtDate = (d) => d ? new Date(d.length === 10 ? d + 'T12:00:00' : d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '';
 const fmtDateTime = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
 const money = (n) => n == null ? '' : '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const localDate = (iso) => new Date(iso).toLocaleDateString('en-CA'); // YYYY-MM-DD in Bryant's time zone, not UTC
+// Build a PostgREST "or" filter that matches text containing q in any of cols (quotes so commas/parentheses work)
+const orIlike = (cols, q) => { const v = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' '); return cols.map((c) => `${c}.ilike."%${v}%"`).join(','); };
+let routeSeq = 0;
+const noteDrafts = {}; // half-typed notes per store survive page redraws
+// Stop double-clicks/Enter from saving twice: a form can submit once every 1.5 s
+document.addEventListener('submit', (e) => {
+  const f = e.target;
+  if (f.dataset.busy) { e.preventDefault(); e.stopImmediatePropagation(); return; }
+  f.dataset.busy = '1'; f.querySelectorAll('button').forEach((b) => (b.disabled = true));
+  setTimeout(() => { delete f.dataset.busy; f.querySelectorAll('button').forEach((b) => (b.disabled = false)); }, 1500);
+}, true);
 const dueClass = (d) => !d ? '' : d < today() ? 'overdue' : d === today() ? 'due-today' : '';
 function toast(msg) { const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2200); }
 function fail(error) { if (error) { console.error(error); toast('Error: ' + (error.message || error)); throw error; } }
@@ -45,10 +57,17 @@ const routes = [
 async function route() {
   if (!me) return viewLogin();
   const h = location.hash || '#/';
+  const seq = ++routeSeq;
+  if (!h.startsWith('#/search/')) document.querySelector('#quicksearch input').value = '';
   document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === h.split('?')[0]));
   for (const [re, fn] of routes) {
     const m = h.split('?')[0].match(re);
-    if (m) { try { await fn(...m.slice(1).map(decodeURIComponent)); } catch (e) { console.error(e); } window.scrollTo(0, 0); return; }
+    if (m) {
+      window.scrollTo(0, 0);
+      const args = m.slice(1).map((x) => { try { return decodeURIComponent(x); } catch { return x; } });
+      try { await fn(...args); } catch (e) { console.error(e); if (seq === routeSeq) $app.innerHTML = `<div class="panel"><p>Something went wrong loading this page.</p><p class="muted small">${esc(e.message || e)}</p><p><a href="#/">Back to Today</a></p></div>`; }
+      return;
+    }
   }
   $app.innerHTML = '<p>Not found.</p>';
 }
@@ -57,7 +76,9 @@ const params = () => new URLSearchParams((location.hash.split('?')[1]) || '');
 
 // ---------- auth ----------
 function viewLogin() {
+  const seq = routeSeq;
   ['nav', 'quicksearch', 'signout', 'settingslink'].forEach((id) => (document.getElementById(id).hidden = true));
+  if (seq !== routeSeq) return;
   $app.innerHTML = `
   <div class="panel login">
     <h1>Sign in</h1>
@@ -88,15 +109,17 @@ sb.auth.onAuthStateChange((_ev, session) => {
 
 // ---------- Today ----------
 async function viewToday() {
+  const seq = routeSeq;
   const t = today();
   const [tasks, follow, recent, ordersRecent] = await Promise.all([
     sb.from('tasks').select('*, stores(id,name,slug)').is('done_at', null).lte('due_date', t).order('due_date').limit(200),
-    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags').lte('next_follow_up', t).order('next_follow_up').limit(200),
+    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags').lte('next_follow_up', t).or('status.is.null,status.neq.skip').order('next_follow_up').limit(200),
     sb.from('timeline').select('id,kind,occurred_at,author,subject,body,store_id,stores(name)').order('occurred_at', { ascending: false }).limit(15),
     sb.from('orders').select('*, stores(id,name)').order('ordered_at', { ascending: false }).limit(8),
   ]);
   [tasks, follow, recent, ordersRecent].forEach((r) => fail(r.error));
   const upcoming = await sb.from('tasks').select('*, stores(id,name)').is('done_at', null).gt('due_date', t).order('due_date').limit(10);
+  if (seq !== routeSeq) return;
   $app.innerHTML = `
   <h1>Today <span class="muted small">${fmtDate(t)}</span></h1>
   <div class="grid2">
@@ -123,14 +146,15 @@ async function viewToday() {
 }
 
 function taskRow(t) {
-  return `<div class="task" data-task="${t.id}">
+  return `<div class="task" data-task="${t.id}" data-due="${esc(t.due_date || '')}" data-title="${esc(t.title)}" data-cat="${esc(t.category || '')}">
     <input type="checkbox" title="Mark done" ${t.done_at ? 'checked' : ''}>
     <span><span>${esc(t.title)}</span>
       ${t.stores ? ` · <a href="#/store/${t.stores.id}">${esc(t.stores.name)}</a>` : ''}
       <div class="small muted">${t.category ? esc(t.category) + ' · ' : ''}<span class="${dueClass(t.due_date)}">${t.due_date ? 'due ' + fmtDate(t.due_date) : 'no date'}</span></div></span>
     <span class="spacer"></span>
-    <button class="link small" data-act="snooze" title="Push to tomorrow">+1d</button>
+    <button class="link small" data-act="snooze" title="Push one day">+1d</button>
     <button class="link small" data-act="week" title="Push one week">+1w</button>
+    <button class="link small" data-act="edit" title="Edit or delete">Edit</button>
   </div>`;
 }
 function bindTaskRows(onChange) {
@@ -141,18 +165,34 @@ function bindTaskRows(onChange) {
       const { data, error } = await sb.from('tasks').update({ done_at: done ? new Date().toISOString() : null }).eq('id', id).select('*').single();
       fail(error);
       if (done && data.store_id) {
-        await sb.from('timeline').insert({ store_id: data.store_id, kind: 'task', author: 'Bryant', subject: 'Task done: ' + data.title, source: 'manual', source_id: 'taskdone:' + id })
+        await sb.from('timeline').upsert({ store_id: data.store_id, kind: 'task', author: 'Bryant', subject: 'Task done: ' + data.title, occurred_at: new Date().toISOString(), source: 'manual', source_id: 'taskdone:' + id }, { onConflict: 'source_id' })
           .then(({ error }) => error && console.warn(error));
       }
+      if (!done) await sb.from('timeline').delete().eq('source_id', 'taskdone:' + id).then(({ error }) => error && console.warn(error));
       toast(done ? 'Done' : 'Reopened');
       onChange ? onChange() : el.style.opacity = done ? .45 : 1;
     };
     el.querySelectorAll('[data-act]').forEach((b) => b.onclick = async () => {
-      const d = new Date(today() + 'T12:00:00'); d.setDate(d.getDate() + (b.dataset.act === 'week' ? 7 : 1));
+      if (b.dataset.act === 'edit') return editTask(el, id, onChange);
+      const cur = el.dataset.due; const base = cur && cur > today() ? cur : today(); // push from the task's own date (or today if it's overdue)
+      const d = new Date(base + 'T12:00:00'); d.setDate(d.getDate() + (b.dataset.act === 'week' ? 7 : 1));
       fail((await sb.from('tasks').update({ due_date: d.toLocaleDateString('en-CA') }).eq('id', id)).error);
       toast('Moved to ' + fmtDate(d.toLocaleDateString('en-CA'))); onChange ? onChange() : route();
     });
   });
+}
+
+async function editTask(el, id, onChange) {
+  el.innerHTML = `<form class="row" style="width:100%">
+    <input name="title" value="${el.dataset.title}" required style="flex:1;min-width:140px">
+    <input type="date" name="due" value="${el.dataset.due}">
+    <select name="category">${CATEGORIES.map((c) => `<option ${c === el.dataset.cat ? 'selected' : ''}>${c}</option>`).join('')}</select>
+    <button>Save</button><button type="button" class="ghost" data-cancel>Cancel</button><button type="button" class="danger" data-del>Delete</button></form>`;
+  const f = el.querySelector('form'); const redo = () => (onChange ? onChange() : route());
+  f.onsubmit = async (e) => { e.preventDefault(); if (!f.title.value.trim()) return toast('A task needs a title');
+    fail((await sb.from('tasks').update({ title: f.title.value.trim(), due_date: f.due.value || null, category: f.category.value }).eq('id', id)).error); toast('Saved'); redo(); };
+  f.querySelector('[data-cancel]').onclick = redo;
+  f.querySelector('[data-del]').onclick = async () => { if (confirm('Delete this task?')) { fail((await sb.from('tasks').delete().eq('id', id)).error); toast('Deleted'); redo(); } };
 }
 
 // ---------- Stores list ----------
@@ -169,10 +209,12 @@ async function allTags() {
 }
 
 async function viewStores() {
+  const seq = routeSeq;
   const p = params();
   const tags = await allTags();
   const sel = (name, opts, label) => `<select data-f="${name}"><option value="">${label}</option>${opts.map((o) => `<option ${p.get(name) === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
   const chip = (key, val, label) => `<button class="chip ${p.get(key) === val ? 'on' : ''}" data-chip="${key}" data-val="${val}">${label}</button>`;
+  if (seq !== routeSeq) return;
   $app.innerHTML = `
   <div class="row"><h1>Stores</h1><span class="spacer"></span><a href="#/stores/new"><button>+ New store</button></a></div>
   <div class="panel">
@@ -200,17 +242,18 @@ async function viewStores() {
 
   const sort = p.get('sort') || 'name', dir = p.get('dir') === 'desc', page = +(p.get('page') || 0), per = 100;
   let q = sb.from('store_list').select('id,name,city,state,channel,account_status,status,key_account,holdout,tags,next_follow_up,last_contact,last_order,faire_spend,shopify_spend,next_task_due', { count: 'exact' });
-  if (p.get('q')) { const s = p.get('q').replace(/[%,()]/g, ' '); q = q.or(`name.ilike.%${s}%,city.ilike.%${s}%,email.ilike.%${s}%,background.ilike.%${s}%`); }
+  if (p.get('q')) q = q.or(orIlike(['name', 'city', 'email', 'background'], p.get('q')));
   if (p.get('channel')) q = q.eq('channel', p.get('channel'));
   if (p.get('account')) q = q.eq('account_status', p.get('account'));
   if (p.get('status')) q = q.eq('status', p.get('status'));
   if (p.get('tag')) q = q.contains('tags', [p.get('tag')]);
-  if (p.get('state')) q = q.ilike('state', p.get('state'));
+  if (p.get('state')) q = q.ilike('state', p.get('state').trim());
   if (p.get('key')) q = q.eq('key_account', true);
   if (p.get('holdout')) q = q.eq('holdout', true);
   if (p.get('due')) q = q.lte('next_follow_up', today());
   q = q.order(sort, { ascending: !dir, nullsFirst: false }).range(page * per, page * per + per - 1);
   const { data, count, error } = await q; fail(error);
+  if (seq !== routeSeq) return;
   const th = (col, label) => `<th data-sort="${col}">${label}${sort === col ? (dir ? ' ↓' : ' ↑') : ''}</th>`;
   document.getElementById('list').innerHTML = `
     <p class="muted small">${count} stores</p>
@@ -254,18 +297,25 @@ function storeForm(s = {}) {
 }
 function readStoreForm(f) {
   const v = (n) => f[n].value.trim() || null;
+  if (!f.name.value.trim()) { toast('The store needs a name'); f.name.focus(); return null; }
+  const st = v('state');
+  const tags = []; f.tags.value.split(',').map((t) => t.trim()).filter(Boolean).forEach((t) => { if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(matchTag(t)); });
   return {
-    name: f.name.value.trim(), city: v('city'), state: v('state'), email: v('email'), phone: v('phone'), website: v('website'), address: v('address'),
+    name: f.name.value.trim(), city: v('city'), state: st && st.length <= 3 ? st.toUpperCase() : st, email: v('email'), phone: v('phone'), website: v('website'), address: v('address'),
     channel: v('channel'), account_status: v('account_status'), status: v('status'), next_follow_up: v('next_follow_up'), pause_until: v('pause_until'),
-    tags: f.tags.value.split(',').map((t) => t.trim()).filter(Boolean), key_account: f.key_account.checked, holdout: f.holdout.checked, background: v('background'),
+    tags, key_account: f.key_account.checked, holdout: f.holdout.checked, background: v('background'),
   };
 }
+// reuse the existing spelling of a tag ("faire" -> "Faire") so the same tag isn't kept twice
+const matchTag = (t) => (tagCache || []).map((x) => x[0]).find((x) => x.toLowerCase() === t.toLowerCase()) || t;
 const slugify = (s) => s.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 function viewNewStore() {
+  const seq = routeSeq;
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<h1>New store</h1><form class="panel" id="sf">${storeForm({ channel: 'prospect', status: 'not-contacted' })}<div class="row" style="margin-top:10px"><button>Save store</button><a href="#/stores">Cancel</a></div></form>`;
   document.getElementById('sf').onsubmit = async (e) => {
     e.preventDefault();
-    const rec = readStoreForm(e.target); rec.slug = slugify(rec.name) + '-' + Date.now().toString(36).slice(-4);
+    const rec = readStoreForm(e.target); if (!rec) return; rec.slug = slugify(rec.name) + '-' + Date.now().toString(36).slice(-4);
     const { data, error } = await sb.from('stores').insert(rec).select('id').single(); fail(error);
     tagCache = null; location.hash = '#/store/' + data.id;
   };
@@ -273,6 +323,7 @@ function viewNewStore() {
 
 // ---------- Store page ----------
 async function viewStore(id) {
+  const seq = routeSeq;
   const [st, contacts, tl, tasks, orders] = await Promise.all([
     sb.from('stores').select('*').eq('id', id).single(),
     sb.from('contacts').select('*').eq('store_id', id).order('name'),
@@ -280,11 +331,13 @@ async function viewStore(id) {
     sb.from('tasks').select('*').eq('store_id', id).order('due_date', { nullsFirst: false }),
     sb.from('orders').select('*').eq('store_id', id).order('ordered_at', { ascending: false }),
   ]);
+  if (seq !== routeSeq) return;
   if (st.error) { $app.innerHTML = '<p>Store not found.</p>'; return; }
   const s = st.data;
   const openTasks = tasks.data.filter((t) => !t.done_at);
   const spend = orders.data.reduce((a, o) => a + Number(o.total || 0), 0);
   const ex = s.extra || {};
+  if (seq !== routeSeq) return;
   $app.innerHTML = `
   <div class="row"><h1 style="margin-bottom:2px">${esc(s.name)}</h1><span class="spacer"></span><button class="ghost" id="editbtn">Edit</button></div>
   <div style="margin-bottom:12px">${storeTags(s)} <span class="muted small">${esc([s.city, s.state].filter(Boolean).join(', '))}</span></div>
@@ -323,7 +376,7 @@ async function viewStore(id) {
           <dt>Last order</dt><dd>${fmtDate(s.last_order) || '—'}</dd>
           <dt>Spend</dt><dd>Faire ${money(s.faire_spend)} · Direct ${money(s.shopify_spend)}${orders.data.length ? ` <span class="muted small">(${orders.data.length} orders here, ${money(spend)})</span>` : ''}</dd>
         </dl>
-        ${s.background ? `<p class="small" style="white-space:pre-wrap;margin-bottom:0">${esc(s.background)}</p>` : ''}
+        ${s.background ? (s.background.length > 280 ? `<details class="small" style="margin-top:8px"><summary>${esc(s.background.slice(0, 200))}… <span class="muted">(more)</span></summary><p style="white-space:pre-wrap">${esc(s.background)}</p></details>` : `<p class="small" style="white-space:pre-wrap;margin-bottom:0">${esc(s.background)}</p>`) : ''}
         ${Object.keys(ex).length ? `<details class="small" style="margin-top:8px"><summary class="muted">More tracker fields</summary><dl class="kv" style="margin-top:6px">${Object.entries(ex).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}</dd>`).join('')}</dl></details>` : ''}
       </div>
       <div class="panel"><div class="row"><h2 style="margin:0">Tasks</h2><span class="spacer"></span><button class="link" id="showdone">${tasks.data.length - openTasks.length} done</button></div>
@@ -350,7 +403,7 @@ async function viewStore(id) {
     const f = document.getElementById('tlfilter').value;
     const rows = tl.data.filter((e) => !f || e.kind === f);
     document.getElementById('tl').innerHTML = rows.map((e) => `
-      <div class="entry ${esc(e.kind)}" data-entry="${e.id}">
+      <div class="entry k-${esc(e.kind)}" data-entry="${e.id}">
         <div class="meta"><b>${KINDS[e.kind] || esc(e.kind)}</b><span>${fmtDateTime(e.occurred_at)}</span>${e.author ? `<span>· ${esc(e.author)}</span>` : ''}
           ${e.contact_id ? `<span>· ${esc(contacts.data.find((c) => c.id === e.contact_id)?.name || '')}</span>` : ''}
           <span class="spacer"></span>${e.source !== 'manual' ? `<span>${esc(e.source)}</span>` : ''}
@@ -375,6 +428,8 @@ async function viewStore(id) {
     const f = box.querySelector('form');
     f.onsubmit = async (ev) => {
       ev.preventDefault();
+      if (!f.when.value || isNaN(new Date(f.when.value))) return toast('Pick a date and time');
+      if (!f.body.value.trim() && !f.subject.value.trim()) return toast('The note is empty. Use Delete to remove it.');
       fail((await sb.from('timeline').update({ kind: f.kind.value, subject: f.subject.value || null, body: f.body.value, occurred_at: new Date(f.when.value).toISOString() }).eq('id', e.id)).error);
       toast('Saved'); viewStore(id);
     };
@@ -384,15 +439,20 @@ async function viewStore(id) {
 
   document.getElementById('addnote').onsubmit = async (ev) => {
     ev.preventDefault(); const f = ev.target;
+    if (!f.body.value.trim()) return toast('Type the note first');
     const when = f.when.value ? new Date(f.when.value).toISOString() : new Date().toISOString();
     fail((await sb.from('timeline').insert({ store_id: id, contact_id: f.contact_id.value || null, kind: f.kind.value, subject: f.subject.value || null, body: f.body.value, occurred_at: when, author: 'Bryant', source: 'manual' })).error);
     const upd = {};
-    if (f.contacted.checked) upd.last_contact = when.slice(0, 10);
+    const day = localDate(when);
+    if (f.contacted.checked && (!s.last_contact || day > s.last_contact)) upd.last_contact = day;
     if (f.contacted.checked && (!s.status || s.status === 'not-contacted')) upd.status = 'contacted';
     if (f.follow.value) upd.next_follow_up = f.follow.value;
     if (Object.keys(upd).length) fail((await sb.from('stores').update(upd).eq('id', id)).error);
-    toast('Added'); viewStore(id);
+    delete noteDrafts[id]; toast('Added'); viewStore(id);
   };
+  const nb = document.querySelector('#addnote textarea[name=body]');
+  if (noteDrafts[id]) nb.value = noteDrafts[id];
+  nb.oninput = () => (noteDrafts[id] = nb.value);
   document.getElementById('addtask').onsubmit = async (ev) => {
     ev.preventDefault(); const f = ev.target;
     fail((await sb.from('tasks').insert({ store_id: id, title: f.title.value, due_date: f.due.value || null, category: f.category.value, source: 'manual' })).error);
@@ -407,7 +467,7 @@ async function viewStore(id) {
     p.scrollIntoView({ behavior: 'smooth' });
     document.getElementById('canceledit').onclick = () => viewStore(id);
     document.getElementById('ef').onsubmit = async (ev) => {
-      ev.preventDefault(); fail((await sb.from('stores').update(readStoreForm(ev.target)).eq('id', id)).error); tagCache = null; toast('Saved'); viewStore(id);
+      ev.preventDefault(); const rec = readStoreForm(ev.target); if (!rec) return; fail((await sb.from('stores').update(rec).eq('id', id)).error); tagCache = null; toast('Saved'); viewStore(id);
     };
   };
   const personForm = (c = {}) => `<form class="stack" id="pf" style="margin-top:8px">
@@ -419,7 +479,8 @@ async function viewStore(id) {
     const f = document.getElementById('pf');
     f.onsubmit = async (ev) => {
       ev.preventDefault();
-      const rec = { store_id: id, name: f.name.value, title: f.title.value || null, email: f.email.value || null, phone: f.phone.value || null, background: f.background.value || null };
+      if (!f.name.value.trim()) return toast('The person needs a name');
+      const rec = { store_id: id, name: f.name.value.trim(), title: f.title.value || null, email: f.email.value || null, phone: f.phone.value || null, background: f.background.value || null };
       fail((c ? await sb.from('contacts').update(rec).eq('id', c.id) : await sb.from('contacts').insert(rec)).error); viewStore(id);
     };
     document.getElementById('pdel')?.addEventListener('click', async () => { if (confirm('Delete this person?')) { fail((await sb.from('contacts').delete().eq('id', c.id)).error); viewStore(id); } });
@@ -430,12 +491,13 @@ async function viewStore(id) {
     document.querySelector(`[data-person="${c.id}"]`).insertAdjacentHTML('afterend', personForm(c)); bindPerson(c);
   }));
   document.getElementById('delstore').onclick = async () => {
-    if (prompt(`Type DELETE to remove ${s.name} and its whole timeline.`) === 'DELETE') { fail((await sb.from('stores').delete().eq('id', id)).error); toast('Deleted'); location.hash = '#/stores'; }
+    if (prompt(`Type DELETE to remove ${s.name} and its whole timeline.`) ?.trim().toUpperCase() === 'DELETE') { fail((await sb.from('stores').delete().eq('id', id)).error); toast('Deleted'); location.hash = '#/stores'; }
   };
 }
 
 // ---------- Tasks ----------
 async function viewTasks() {
+  const seq = routeSeq;
   const p = params(); const show = p.get('show') || 'open';
   let q = sb.from('tasks').select('*, stores(id,name)');
   q = show === 'done' ? q.not('done_at', 'is', null).order('done_at', { ascending: false }).limit(200) : q.is('done_at', null).order('due_date', { nullsFirst: false }).limit(1000);
@@ -444,6 +506,7 @@ async function viewTasks() {
   const groups = show === 'done' ? { 'Recently done': data } : {
     Overdue: data.filter((x) => x.due_date && x.due_date < t), Today: data.filter((x) => x.due_date === t),
     Upcoming: data.filter((x) => x.due_date > t), 'No date': data.filter((x) => !x.due_date) };
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<div class="row"><h1>Tasks</h1><span class="spacer"></span>
     <a href="#/tasks"><button class="${show === 'open' ? '' : 'ghost'}">Open</button></a><a href="#/tasks?show=done"><button class="${show === 'done' ? '' : 'ghost'}">Done</button></a></div>
     ${Object.entries(groups).filter(([, v]) => v.length).map(([k, v]) => `<div class="panel"><h2 style="margin-top:0">${k} (${v.length})</h2>${v.map(taskRow).join('')}</div>`).join('') || '<p class="muted">No tasks.</p>'}`;
@@ -452,14 +515,16 @@ async function viewTasks() {
 
 // ---------- Orders ----------
 async function viewOrders() {
+  const seq = routeSeq;
   const p = params(); const ch = p.get('channel') || '';
   let q = sb.from('orders').select('*, stores(id,name)').order('ordered_at', { ascending: false }).limit(300);
   if (ch) q = q.eq('channel', ch);
   const { data, error } = await q; fail(error);
   const total = data.reduce((a, o) => a + Number(o.total || 0), 0);
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<div class="row"><h1>Orders</h1><span class="spacer"></span>
     <a href="#/orders"><button class="${!ch ? '' : 'ghost'}">All</button></a><a href="#/orders?channel=shopify"><button class="${ch === 'shopify' ? '' : 'ghost'}">Shopify</button></a><a href="#/orders?channel=faire"><button class="${ch === 'faire' ? '' : 'ghost'}">Faire</button></a></div>
-    <p class="muted small">Latest ${data.length} orders · ${money(total)}</p>
+    <p class="muted small">Showing the latest ${data.length} orders (${money(total)} across these)</p>
     <div class="tablewrap"><table><thead><tr><th>Date</th><th>Store</th><th>Channel</th><th>Order</th><th>Total</th></tr></thead><tbody>
     ${data.map((o) => `<tr><td>${fmtDate(o.ordered_at)}</td><td>${o.stores ? `<a href="#/store/${o.stores.id}">${esc(o.stores.name)}</a>` : `<span class="muted">${esc(o.customer_name || '')} (no store matched)</span>`}</td>
       <td>${esc(o.channel)}</td><td>${esc(o.order_no || '')}</td><td>${money(o.total)}</td></tr>`).join('')}</tbody></table></div>`;
@@ -467,24 +532,27 @@ async function viewOrders() {
 
 // ---------- Activity feed ----------
 async function viewActivity() {
+  const seq = routeSeq;
   const page = +(params().get('page') || 0);
   const { data, error } = await sb.from('timeline').select('*, stores(id,name)').order('occurred_at', { ascending: false }).range(page * 50, page * 50 + 49); fail(error);
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<h1>All activity</h1><div class="timeline">${data.map((e) => `
-    <div class="entry ${esc(e.kind)}"><div class="meta"><b>${KINDS[e.kind] || esc(e.kind)}</b><a href="#/store/${e.store_id}">${esc(e.stores?.name || '')}</a><span>${fmtDateTime(e.occurred_at)}</span>${e.author ? `<span>· ${esc(e.author)}</span>` : ''}</div>
+    <div class="entry k-${esc(e.kind)}"><div class="meta"><b>${KINDS[e.kind] || esc(e.kind)}</b><a href="#/store/${e.store_id}">${esc(e.stores?.name || '')}</a><span>${fmtDateTime(e.occurred_at)}</span>${e.author ? `<span>· ${esc(e.author)}</span>` : ''}</div>
     ${e.subject ? `<div class="subject">${esc(e.subject)}</div>` : ''}${e.body ? `<div class="body">${esc(e.body.length > 600 ? e.body.slice(0, 600) + '…' : e.body)}</div>` : ''}</div>`).join('')}</div>
     <div class="pager">${page ? `<a href="#/activity?page=${page - 1}"><button class="ghost">← Newer</button></a>` : ''}${data.length === 50 ? `<a href="#/activity?page=${page + 1}"><button class="ghost">Older →</button></a>` : ''}</div>`;
 }
 
 // ---------- Search ----------
 async function viewSearch(q) {
-  const s = q.replace(/[%,()]/g, ' ');
+  const seq = routeSeq;
   document.querySelector('#quicksearch input').value = q;
   const [stores, people, notes] = await Promise.all([
-    sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags').or(`name.ilike.%${s}%,city.ilike.%${s}%,email.ilike.%${s}%,background.ilike.%${s}%`).order('name').limit(50),
-    sb.from('contacts').select('id,name,email,store_id,stores(name)').or(`name.ilike.%${s}%,email.ilike.%${s}%`).limit(50),
-    sb.from('timeline').select('id,kind,occurred_at,subject,body,store_id,stores(name)').or(`body.ilike.%${s}%,subject.ilike.%${s}%`).order('occurred_at', { ascending: false }).limit(50),
+    sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags').or(orIlike(['name', 'city', 'email', 'background'], q)).order('name').limit(50),
+    sb.from('contacts').select('id,name,email,store_id,stores(name)').or(orIlike(['name', 'email'], q)).limit(50),
+    sb.from('timeline').select('id,kind,occurred_at,subject,body,store_id,stores(name)').or(orIlike(['body', 'subject'], q)).order('occurred_at', { ascending: false }).limit(50),
   ]);
   const hl = (txt) => { const t = String(txt || ''); const i = t.toLowerCase().indexOf(q.toLowerCase()); const a = Math.max(0, i - 80); return esc((a ? '…' : '') + t.slice(a, a + 220)); };
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<h1>Search: “${esc(q)}”</h1>
     <div class="panel"><h2 style="margin-top:0">Stores (${stores.data?.length || 0})</h2>${(stores.data || []).map((x) => `<div class="task"><a href="#/store/${x.id}">${esc(x.name)}</a> ${storeTags(x)}<span class="muted small">${esc([x.city, x.state].filter(Boolean).join(', '))}</span></div>`).join('') || '<p class="muted small">None</p>'}</div>
     <div class="panel"><h2 style="margin-top:0">People (${people.data?.length || 0})</h2>${(people.data || []).map((x) => `<div class="task"><span>${esc(x.name)} <span class="muted small">${esc(x.email || '')}</span></span>${x.store_id ? `· <a href="#/store/${x.store_id}">${esc(x.stores?.name || '')}</a>` : ''}</div>`).join('') || '<p class="muted small">None</p>'}</div>
@@ -493,6 +561,7 @@ async function viewSearch(q) {
 
 // ---------- Playbook, handoffs, wins ----------
 async function viewPlaybook() {
+  const seq = routeSeq;
   const [pb, ho, wins] = await Promise.all([
     sb.from('playbook').select('*').order('sort'),
     sb.from('handoffs').select('*').eq('status', 'open').order('created_on', { ascending: false }),
@@ -502,6 +571,7 @@ async function viewPlaybook() {
   const month = today().slice(0, 7);
   const counted = wins.data.filter((w) => w.confidence === 'counted');
   const thisMonth = counted.filter((w) => w.won_on.slice(0, 7) === month).reduce((a, w) => a + Number(w.amount || 0), 0);
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<h1>Playbook</h1>
   <div class="stats">
     <div class="panel"><div class="muted small">Outreach wins this month</div><div class="stat">${money(thisMonth)}</div><div class="muted small">goal $1,000</div></div>
@@ -526,19 +596,24 @@ async function viewPlaybook() {
   const bindEdit = (box, x) => {
     const f = box.querySelector('form');
     f.onsubmit = async (e) => { e.preventDefault(); const rec = { heading: f.heading.value.trim(), body: f.body.value };
-      fail((x ? await sb.from('playbook').update(rec).eq('id', x.id) : await sb.from('playbook').insert({ ...rec, sort: 1000 })).error); toast('Saved'); viewPlaybook(); };
+      if (!rec.heading) return toast('Give the section a heading');
+      const r = x ? await sb.from('playbook').update(rec).eq('id', x.id) : await sb.from('playbook').insert({ ...rec, sort: 1000 });
+      if (r.error?.code === '23505') return toast('There is already a section with that heading');
+      fail(r.error); toast('Saved'); viewPlaybook(); };
     f.querySelector('[data-cancel]').onclick = viewPlaybook;
     f.querySelector('[data-del]')?.addEventListener('click', async () => { if (confirm('Delete this section?')) { fail((await sb.from('playbook').delete().eq('id', x.id)).error); viewPlaybook(); } });
   };
   document.querySelectorAll('[data-editpb]').forEach((b) => (b.onclick = () => { const x = pb.data.find((y) => y.id === b.dataset.editpb); const box = document.querySelector(`[data-pb="${x.id}"]`); box.innerHTML = editForm(x); bindEdit(box, x); }));
   document.getElementById('addpb').onclick = (e) => { const box = document.createElement('div'); box.className = 'panel'; box.innerHTML = editForm(); e.target.before(box); bindEdit(box, null); };
-  document.querySelectorAll('[data-closeho]').forEach((b) => (b.onclick = async () => { fail((await sb.from('handoffs').update({ status: 'done', done_by: 'Bryant', done_on: today() }).eq('id', b.dataset.closeho)).error); toast('Marked done'); viewPlaybook(); }));
+  document.querySelectorAll('[data-closeho]').forEach((b) => (b.onclick = async () => { if (!confirm('Mark this note done? It will drop off this list.')) return; fail((await sb.from('handoffs').update({ status: 'done', done_by: 'Bryant', done_on: today() }).eq('id', b.dataset.closeho)).error); toast('Marked done'); viewPlaybook(); }));
   document.getElementById('addho').onsubmit = async (e) => { e.preventDefault(); const f = e.target;
     fail((await sb.from('handoffs').insert({ from_who: 'bryant', to_who: f.to.value.trim() || 'all', topic: f.topic.value.trim(), note: f.note.value || null, created_on: today() })).error); toast('Added'); viewPlaybook(); };
 }
 
 // ---------- Settings ----------
 function viewSettings() {
+  const seq = routeSeq;
+  if (seq !== routeSeq) return;
   $app.innerHTML = `<h1>Settings</h1><form class="panel stack" id="pw" style="max-width:380px">
     <p class="muted small" style="margin:0">Signed in as ${esc(me.email)}</p>
     <label>New password<input type="password" name="p1" minlength="8" required autocomplete="new-password"></label>

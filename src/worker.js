@@ -38,14 +38,18 @@ async function db(env, path, { method = 'GET', body, prefer } = {}) {
 }
 const enc = encodeURIComponent;
 const clean = (s) => String(s).replace(/[%,()*]/g, ' ').trim();
+// escape text for a LIKE pattern, and build an "or" filter matching it in any of cols (quoted so commas/parentheses work)
+const likeEsc = (q) => String(q).trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' ');
+const orIlike = (cols, q) => 'or=(' + cols.map((c) => `${c}.ilike.${enc(`"%${likeEsc(q)}%"`)}`).join(',') + ')';
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
 
 async function findStore(env, ref) {
   if (!ref) throw new Error('store is required (id, slug or name)');
   if (/^[0-9a-f-]{36}$/.test(ref)) { const r = await db(env, `stores?id=eq.${ref}&select=*`); if (r[0]) return r[0]; }
   let r = await db(env, `stores?slug=eq.${enc(ref)}&select=*`); if (r[0]) return r[0];
-  r = await db(env, `stores?name=ilike.${enc(clean(ref))}&select=*`); if (r.length === 1) return r[0];
-  r = await db(env, `stores?name=ilike.*${enc(clean(ref))}*&select=id,name,city,state&limit=10`);
+  const pat = String(ref).trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' ');  // plain filters take no quotes
+  r = await db(env, `stores?name=ilike.${enc(pat)}&select=*`); if (r.length === 1) return r[0];
+  r = await db(env, `stores?name=ilike.${enc('%' + pat + '%')}&select=id,name,city,state&limit=10`);
   if (r.length === 1) return (await db(env, `stores?id=eq.${r[0].id}&select=*`))[0];
   if (!r.length) throw new Error(`No store matches "${ref}". Use search_stores or create_store.`);
   throw new Error(`"${ref}" matches several stores: ${r.map((x) => `${x.name} (${x.city || ''} ${x.state || ''}, id ${x.id})`).join('; ')}. Pass the id.`);
@@ -73,7 +77,7 @@ const TOOLS = [
       follow_up_due: { type: 'boolean', description: 'Only stores whose next follow-up is today or earlier' }, limit: { type: 'number' } } },
     async run(env, a) {
       const f = ['select=id,slug,name,city,state,channel,account_status,status,key_account,holdout,tags,last_contact,next_follow_up,last_order'];
-      if (a.query) { const q = enc(clean(a.query)); f.push(`or=(name.ilike.*${q}*,city.ilike.*${q}*,email.ilike.*${q}*,background.ilike.*${q}*)`); }
+      if (a.query) f.push(orIlike(['name', 'city', 'email', 'background'], a.query));
       if (a.channel) f.push(`channel=eq.${a.channel}`);
       if (a.account_status) f.push(`account_status=eq.${a.account_status}`);
       if (a.status) f.push(`status=eq.${a.status}`);
@@ -122,7 +126,8 @@ const TOOLS = [
       const ins = await db(env, `timeline${a.source_id ? '?on_conflict=source_id' : ''}`, { method: 'POST', body: row, prefer: a.source_id ? 'return=representation,resolution=ignore-duplicates' : undefined });
       const upd = {};
       const contact = a.counts_as_contact ?? ['email', 'call', 'faire', 'mail'].includes(a.kind);
-      if (contact && (!s.last_contact || when.slice(0, 10) >= s.last_contact)) upd.last_contact = when.slice(0, 10);
+      const day = new Date(when).toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
+      if (contact && (!s.last_contact || day > s.last_contact)) upd.last_contact = day;
       if (a.status) upd.status = a.status; else if (contact && (!s.status || s.status === 'not-contacted')) upd.status = 'contacted';
       if (a.next_follow_up) upd.next_follow_up = a.next_follow_up;
       if (Object.keys(upd).length) await db(env, `stores?id=eq.${s.id}`, { method: 'PATCH', body: upd });
@@ -227,8 +232,7 @@ const TOOLS = [
     description: 'Full-text search across all notes, emails and messages in every store\'s timeline.',
     inputSchema: { type: 'object', properties: { query: { type: 'string' }, since: { type: 'string', description: 'YYYY-MM-DD' }, limit: { type: 'number' } }, required: ['query'] },
     async run(env, a) {
-      const q = enc(clean(a.query));
-      return db(env, `timeline?or=(body.ilike.*${q}*,subject.ilike.*${q}*)${a.since ? `&occurred_at=gte.${a.since}` : ''}&select=id,kind,occurred_at,author,subject,body,store_id,stores(name)&order=occurred_at.desc&limit=${Math.min(a.limit || 25, 100)}`);
+      return db(env, `timeline?${orIlike(['body', 'subject'], a.query)}${a.since ? `&occurred_at=gte.${a.since}` : ''}&select=id,kind,occurred_at,author,subject,body,store_id,stores(name)&order=occurred_at.desc&limit=${Math.min(a.limit || 25, 100)}`);
     },
   },
   {

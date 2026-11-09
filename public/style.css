@@ -51,14 +51,15 @@ tr:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .tablewrap { overflow-x: auto; }
 .timeline { display: flex; flex-direction: column; gap: 10px; }
 .entry { border-radius: 10px; padding: 10px 12px; background: var(--note); border: 1px solid var(--line); }
-.entry.email { background: var(--email); } .entry.order { background: var(--order); }
-.entry.task { background: var(--task); } .entry.faire { background: var(--faire); }
+.entry.k-email { background: var(--email); } .entry.k-order { background: var(--order); }
+.entry.k-task { background: var(--task); } .entry.k-faire { background: var(--faire); }
 .entry .meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .entry .body { white-space: pre-wrap; margin-top: 4px; overflow-wrap: anywhere; }
 .entry .subject { font-weight: 600; margin-top: 4px; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; font-size: 14px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
-.task { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.task { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.task > span { min-width: 0; }
 .task:last-child { border-bottom: 0; }
 .overdue { color: var(--danger); font-weight: 600; }
 .due-today { color: var(--warn); font-weight: 600; }
@@ -73,3 +74,13 @@ form.stack label { display: flex; flex-direction: column; gap: 3px; font-size: 1
 .pager { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
 .stat { font-size: 22px; font-weight: 700; }
 .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+
+@media (max-width: 640px) {
+  .top { gap: 8px 12px; padding: 8px 12px; position: static; }
+  .brand { font-size: 14px; }
+  nav { gap: 10px; overflow-x: auto; flex-wrap: nowrap; width: 100%; order: 3; font-size: 14px; }
+  #quicksearch { order: 4; flex-basis: 100%; }
+  main { padding: 12px; }
+  h1 { font-size: 19px; }
+}
+button:disabled { opacity: .6; cursor: default; }
