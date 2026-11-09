@@ -256,7 +256,7 @@ async function viewStores() {
   if (p.get('key')) q = q.eq('key_account', true);
   if (p.get('holdout')) q = q.eq('holdout', true);
   if (p.get('due')) q = q.lte('next_follow_up', today());
-  if (p.get('ordered')) q = q.not('last_order', 'is', null);
+  if (p.get('ordered')) q = q.gt('order_total', 0); // paid orders only; $0 sample orders don't count
   q = p.get('archived') ? q.not('archived_at', 'is', null) : q.is('archived_at', null);
   q = q.order(sort, { ascending: !dir, nullsFirst: false }).range(page * per, page * per + per - 1);
   const { data, count, error } = await q; fail(error);

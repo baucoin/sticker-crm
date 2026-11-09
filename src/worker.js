@@ -75,7 +75,7 @@ const TOOLS = [
       query: { type: 'string' }, channel: STORE_FIELDS.channel, account_status: STORE_FIELDS.account_status, status: STORE_FIELDS.status,
       tag: { type: 'string' }, state: { type: 'string' }, key_account: { type: 'boolean' }, holdout: { type: 'boolean' },
       follow_up_due: { type: 'boolean', description: 'Only stores whose next follow-up is today or earlier' },
-      has_ordered: { type: 'boolean', description: 'true = only stores that have ordered at least once; false = only stores that never ordered' },
+      has_ordered: { type: 'boolean', description: 'true = only stores with at least one paid order ($0 sample orders do not count); false = never paid' },
       include_archived: { type: 'boolean', description: 'Archived stores (never ordered, gone quiet) are hidden unless this is true' },
       archived_only: { type: 'boolean' }, limit: { type: 'number' } } },
     async run(env, a) {
@@ -89,10 +89,10 @@ const TOOLS = [
       if (a.key_account != null) f.push(`key_account=is.${a.key_account}`);
       if (a.holdout != null) f.push(`holdout=is.${a.holdout}`);
       if (a.follow_up_due) f.push(`next_follow_up=lte.${today()}`);
-      if (a.has_ordered != null) f.push(`last_order=${a.has_ordered ? 'not.is' : 'is'}.null`);
+      if (a.has_ordered != null) f.push(`order_total=${a.has_ordered ? 'gt' : 'eq'}.0`); // paid orders only
       if (a.archived_only) f.push('archived_at=not.is.null'); else if (!a.include_archived) f.push('archived_at=is.null');
       f.push(`order=name`, `limit=${Math.min(a.limit || 25, 200)}`);
-      return db(env, `stores?${f.join('&')}`);
+      return db(env, `${a.has_ordered != null ? 'store_list' : 'stores'}?${f.join('&')}`);
     },
   },
   {
