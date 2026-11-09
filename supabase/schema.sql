@@ -188,3 +188,10 @@ create table if not exists public.wins (
   store_name text, amount numeric(12,2), channel text, confidence text default 'counted', contact_by text, contact_on date,
   contact_via text, won_on date not null default current_date, order_no text, note text, created_at timestamptz not null default now());
 -- (same signed_in_all / machine_key policies as the other tables)
+
+-- Archive (11/9): hidden from lists unless the Archived filter is on. New orders bring a store back.
+alter table stores add column if not exists archived_at timestamptz;
+create or replace function unarchive_on_order() returns trigger language plpgsql security definer set search_path = public as $$
+begin update stores set archived_at = null where id = new.store_id and archived_at is not null; return new; end $$;
+create trigger orders_unarchive after insert on orders for each row execute function unarchive_on_order();
+-- store_list view gained archived_at as its last column.

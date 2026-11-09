@@ -74,9 +74,12 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {
       query: { type: 'string' }, channel: STORE_FIELDS.channel, account_status: STORE_FIELDS.account_status, status: STORE_FIELDS.status,
       tag: { type: 'string' }, state: { type: 'string' }, key_account: { type: 'boolean' }, holdout: { type: 'boolean' },
-      follow_up_due: { type: 'boolean', description: 'Only stores whose next follow-up is today or earlier' }, limit: { type: 'number' } } },
+      follow_up_due: { type: 'boolean', description: 'Only stores whose next follow-up is today or earlier' },
+      has_ordered: { type: 'boolean', description: 'true = only stores that have ordered at least once; false = only stores that never ordered' },
+      include_archived: { type: 'boolean', description: 'Archived stores (never ordered, gone quiet) are hidden unless this is true' },
+      archived_only: { type: 'boolean' }, limit: { type: 'number' } } },
     async run(env, a) {
-      const f = ['select=id,slug,name,city,state,channel,account_status,status,key_account,holdout,tags,last_contact,next_follow_up,last_order'];
+      const f = ['select=id,slug,name,city,state,channel,account_status,status,key_account,holdout,tags,last_contact,next_follow_up,last_order,archived_at'];
       if (a.query) f.push(orIlike(['name', 'city', 'email', 'background'], a.query));
       if (a.channel) f.push(`channel=eq.${a.channel}`);
       if (a.account_status) f.push(`account_status=eq.${a.account_status}`);
@@ -86,6 +89,8 @@ const TOOLS = [
       if (a.key_account != null) f.push(`key_account=is.${a.key_account}`);
       if (a.holdout != null) f.push(`holdout=is.${a.holdout}`);
       if (a.follow_up_due) f.push(`next_follow_up=lte.${today()}`);
+      if (a.has_ordered != null) f.push(`last_order=${a.has_ordered ? 'not.is' : 'is'}.null`);
+      if (a.archived_only) f.push('archived_at=not.is.null'); else if (!a.include_archived) f.push('archived_at=is.null');
       f.push(`order=name`, `limit=${Math.min(a.limit || 25, 200)}`);
       return db(env, `stores?${f.join('&')}`);
     },
@@ -130,6 +135,7 @@ const TOOLS = [
       if (contact && (!s.last_contact || day > s.last_contact)) upd.last_contact = day;
       if (a.status) upd.status = a.status; else if (contact && (!s.status || s.status === 'not-contacted')) upd.status = 'contacted';
       if (a.next_follow_up) upd.next_follow_up = a.next_follow_up;
+      if (contact && s.archived_at) upd.archived_at = null; // talking to them again brings them back
       if (Object.keys(upd).length) await db(env, `stores?id=eq.${s.id}`, { method: 'PATCH', body: upd });
       return { logged: ins?.[0] || 'already logged', store: s.name, store_updates: upd };
     },
@@ -142,7 +148,7 @@ const TOOLS = [
       const d = a.through || today();
       const [tasks, stores] = await Promise.all([
         db(env, `tasks?done_at=is.null&due_date=lte.${d}&select=id,title,category,due_date,store_id,stores(name)&order=due_date&limit=300`),
-        db(env, `stores?next_follow_up=lte.${d}&select=id,name,city,state,channel,status,key_account,next_follow_up,last_contact&order=next_follow_up&limit=300`),
+        db(env, `stores?next_follow_up=lte.${d}&archived_at=is.null&select=id,name,city,state,channel,status,key_account,next_follow_up,last_contact&order=next_follow_up&limit=300`),
       ]);
       return { through: d, tasks, follow_ups: stores };
     },
@@ -183,11 +189,12 @@ const TOOLS = [
   },
   {
     name: 'update_store',
-    description: 'Change a store\'s fields: status, account status, channel, follow-up date, tags, key account, holdout, contact info, background.',
-    inputSchema: { type: 'object', properties: { store: { type: 'string' }, ...STORE_FIELDS, add_tags: { type: 'array', items: { type: 'string' } }, remove_tags: { type: 'array', items: { type: 'string' } } }, required: ['store'] },
+    description: 'Change a store\'s fields: status, account status, channel, follow-up date, tags, key account, holdout, archived, contact info, background.',
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, ...STORE_FIELDS, archived: { type: 'boolean', description: 'Archive (hide from lists) or bring back' }, add_tags: { type: 'array', items: { type: 'string' } }, remove_tags: { type: 'array', items: { type: 'string' } } }, required: ['store'] },
     async run(env, a) {
       const s = await findStore(env, a.store);
       const upd = pick(a, Object.keys(STORE_FIELDS));
+      if (a.archived != null) upd.archived_at = a.archived ? new Date().toISOString() : null;
       if (a.add_tags || a.remove_tags) {
         const t = new Set(upd.tags || s.tags || []);
         (a.add_tags || []).forEach((x) => t.add(x)); (a.remove_tags || []).forEach((x) => t.delete(x));

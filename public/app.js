@@ -37,6 +37,7 @@ function storeTags(s) {
   let h = '';
   if (s.key_account) h += '<span class="tag key">Key account</span>';
   if (s.holdout) h += '<span class="tag hold">Holdout</span>';
+  if (s.archived_at) h += '<span class="tag">Archived</span>';
   for (const t of s.tags || []) h += `<span class="tag">${esc(t)}</span>`;
   return h;
 }
@@ -113,7 +114,7 @@ async function viewToday() {
   const t = today();
   const [tasks, follow, recent, ordersRecent] = await Promise.all([
     sb.from('tasks').select('*, stores(id,name,slug)').is('done_at', null).lte('due_date', t).order('due_date').limit(200),
-    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags').lte('next_follow_up', t).or('status.is.null,status.neq.skip').order('next_follow_up').limit(200),
+    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags').lte('next_follow_up', t).or('status.is.null,status.neq.skip').is('archived_at', null).order('next_follow_up').limit(200),
     sb.from('timeline').select('id,kind,occurred_at,author,subject,body,store_id,stores(name)').order('occurred_at', { ascending: false }).limit(15),
     sb.from('orders').select('*, stores(id,name)').order('ordered_at', { ascending: false }).limit(8),
   ]);
@@ -231,9 +232,9 @@ async function viewStores() {
       <input data-f="state" placeholder="State" value="${esc(p.get('state') || '')}" style="width:70px">
     </div>
     <div class="chips">
-      ${chip('key', '1', '★ Key accounts')} ${chip('channel', 'faire', 'Faire')} ${chip('channel', 'direct', 'Direct')} ${chip('channel', 'both', 'Faire + direct')}
+      ${chip('ordered', '1', 'Has ordered')} ${chip('key', '1', '★ Key accounts')} ${chip('channel', 'faire', 'Faire')} ${chip('channel', 'direct', 'Direct')} ${chip('channel', 'both', 'Faire + direct')}
       ${chip('holdout', '1', 'Holdouts')} ${chip('due', '1', 'Follow-up due')} ${chip('account', 'Active', 'Active')} ${chip('account', 'Overdue', 'Overdue')}
-      ${chip('account', 'Lapsed', 'Lapsed')} ${chip('account', 'Dormant', 'Dormant')} ${chip('status', 'replied', 'Replied')}
+      ${chip('account', 'Lapsed', 'Lapsed')} ${chip('account', 'Dormant', 'Dormant')} ${chip('status', 'replied', 'Replied')} ${chip('archived', '1', 'Archived')}
       ${p.toString() ? '<button class="chip" id="clearf">✕ Clear</button>' : ''}
     </div>
   </div>
@@ -245,7 +246,7 @@ async function viewStores() {
   const clr = document.getElementById('clearf'); if (clr) clr.onclick = () => (location.hash = '#/stores');
 
   const sort = p.get('sort') || 'name', dir = p.get('dir') === 'desc', page = +(p.get('page') || 0), per = 100;
-  let q = sb.from('store_list').select('id,name,city,state,channel,account_status,status,key_account,holdout,tags,next_follow_up,last_contact,last_order,faire_spend,shopify_spend,next_task_due', { count: 'exact' });
+  let q = sb.from('store_list').select('id,name,city,state,channel,account_status,status,key_account,holdout,tags,next_follow_up,last_contact,last_order,faire_spend,shopify_spend,next_task_due,archived_at', { count: 'exact' });
   if (p.get('q')) q = q.or(orIlike(['name', 'city', 'email', 'background'], p.get('q')));
   if (p.get('channel')) q = q.eq('channel', p.get('channel'));
   if (p.get('account')) q = q.eq('account_status', p.get('account'));
@@ -255,6 +256,8 @@ async function viewStores() {
   if (p.get('key')) q = q.eq('key_account', true);
   if (p.get('holdout')) q = q.eq('holdout', true);
   if (p.get('due')) q = q.lte('next_follow_up', today());
+  if (p.get('ordered')) q = q.not('last_order', 'is', null);
+  q = p.get('archived') ? q.not('archived_at', 'is', null) : q.is('archived_at', null);
   q = q.order(sort, { ascending: !dir, nullsFirst: false }).range(page * per, page * per + per - 1);
   const { data, count, error } = await q; fail(error);
   if (seq !== routeSeq) return;
@@ -398,7 +401,7 @@ async function viewStore(id) {
           <div class="small">${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a> ` : ''}${c.phone ? esc(c.phone) : ''}</div>${c.background ? `<div class="small muted">${esc(c.background)}</div>` : ''}</span>
           <span class="spacer"></span><button class="link small" data-editperson="${c.id}">Edit</button></div>`).join('') || '<p class="muted small">No people yet.</p>'}</div>
       </div>
-      <div class="panel"><button class="link" id="delstore" style="color:var(--danger)">Delete this store…</button></div>
+      <div class="panel row"><button class="ghost" id="archstore">${s.archived_at ? 'Bring back from archive' : 'Archive this store'}</button><span class="spacer"></span><button class="link" id="delstore" style="color:var(--danger)">Delete this store…</button></div>
     </div>
   </div>`;
 
@@ -451,6 +454,7 @@ async function viewStore(id) {
     if (f.contacted.checked && (!s.last_contact || day > s.last_contact)) upd.last_contact = day;
     if (f.contacted.checked && (!s.status || s.status === 'not-contacted')) upd.status = 'contacted';
     if (f.follow.value) upd.next_follow_up = f.follow.value;
+    if (s.archived_at && (f.contacted.checked || f.follow.value)) upd.archived_at = null;
     if (Object.keys(upd).length) fail((await sb.from('stores').update(upd).eq('id', id)).error);
     delete noteDrafts[id]; toast('Added'); viewStore(id);
   };
@@ -494,6 +498,10 @@ async function viewStore(id) {
     document.getElementById('pf')?.remove(); const c = contacts.data.find((x) => x.id === b.dataset.editperson);
     document.querySelector(`[data-person="${c.id}"]`).insertAdjacentHTML('afterend', personForm(c)); bindPerson(c);
   }));
+  document.getElementById('archstore').onclick = async () => {
+    fail((await sb.from('stores').update({ archived_at: s.archived_at ? null : new Date().toISOString() }).eq('id', id)).error);
+    toast(s.archived_at ? 'Back in the active list' : 'Archived. It stays searchable, and the Archived filter shows it.'); viewStore(id);
+  };
   document.getElementById('delstore').onclick = async () => {
     if (prompt(`Type DELETE to remove ${s.name} and its whole timeline.`) ?.trim().toUpperCase() === 'DELETE') { fail((await sb.from('stores').delete().eq('id', id)).error); toast('Deleted'); location.hash = '#/stores'; }
   };
@@ -551,7 +559,7 @@ async function viewSearch(q) {
   const seq = routeSeq;
   document.querySelector('#quicksearch input').value = q;
   const [stores, people, notes] = await Promise.all([
-    sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags').or(orIlike(['name', 'city', 'email', 'background'], q)).order('name').limit(50),
+    sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags,archived_at').or(orIlike(['name', 'city', 'email', 'background'], q)).order('name').limit(50),
     sb.from('contacts').select('id,name,email,store_id,stores(name)').or(orIlike(['name', 'email'], q)).limit(50),
     sb.from('timeline').select('id,kind,occurred_at,subject,body,store_id,stores(name)').or(orIlike(['body', 'subject'], q)).order('occurred_at', { ascending: false }).limit(50),
   ]);
