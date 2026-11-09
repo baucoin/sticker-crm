@@ -39,6 +39,7 @@ const routes = [
   [/^#\/orders$/, viewOrders],
   [/^#\/activity$/, viewActivity],
   [/^#\/search\/(.*)$/, viewSearch],
+  [/^#\/settings$/, viewSettings],
 ];
 async function route() {
   if (!me) return viewLogin();
@@ -55,7 +56,7 @@ const params = () => new URLSearchParams((location.hash.split('?')[1]) || '');
 
 // ---------- auth ----------
 function viewLogin() {
-  ['nav', 'quicksearch', 'signout'].forEach((id) => (document.getElementById(id).hidden = true));
+  ['nav', 'quicksearch', 'signout', 'settingslink'].forEach((id) => (document.getElementById(id).hidden = true));
   $app.innerHTML = `
   <div class="panel login">
     <h1>Sign in</h1>
@@ -63,7 +64,6 @@ function viewLogin() {
       <label>Email<input type="email" name="email" required autocomplete="username"></label>
       <label>Password<input type="password" name="password" required autocomplete="current-password"></label>
       <button>Sign in</button>
-      <button type="button" class="link" id="magic">Email me a sign-in link instead</button>
     </form>
   </div>`;
   const f = document.getElementById('loginform');
@@ -71,11 +71,6 @@ function viewLogin() {
     e.preventDefault();
     const { error } = await sb.auth.signInWithPassword({ email: f.email.value, password: f.password.value });
     if (error) toast(error.message);
-  };
-  document.getElementById('magic').onclick = async () => {
-    if (!f.email.value) return toast('Type your email first');
-    const { error } = await sb.auth.signInWithOtp({ email: f.email.value, options: { emailRedirectTo: location.origin, shouldCreateUser: false } });
-    toast(error ? error.message : 'Check your email for the link');
   };
 }
 document.getElementById('signout').onclick = () => sb.auth.signOut();
@@ -86,8 +81,8 @@ document.getElementById('quicksearch').onsubmit = (e) => {
 };
 sb.auth.onAuthStateChange((_ev, session) => {
   const was = me; me = session?.user || null;
-  ['nav', 'quicksearch', 'signout'].forEach((id) => (document.getElementById(id).hidden = !me));
-  if (!!was !== !!me) route();
+  ['nav', 'quicksearch', 'signout', 'settingslink'].forEach((id) => (document.getElementById(id).hidden = !me));
+  if (!!was !== !!me) setTimeout(route, 0); // never call supabase inside this callback (it deadlocks)
 });
 
 // ---------- Today ----------
@@ -495,6 +490,21 @@ async function viewSearch(q) {
     <div class="panel"><h2 style="margin-top:0">Notes and emails (${notes.data?.length || 0})</h2>${(notes.data || []).map((x) => `<div class="task"><span><a href="#/store/${x.store_id}">${esc(x.stores?.name || '')}</a> <span class="muted small">${KINDS[x.kind] || x.kind} · ${fmtDate(x.occurred_at)}</span><div class="small">${hl(x.body || x.subject)}</div></span></div>`).join('') || '<p class="muted small">None</p>'}</div>`;
 }
 
+// ---------- Settings ----------
+function viewSettings() {
+  $app.innerHTML = `<h1>Settings</h1><form class="panel stack" id="pw" style="max-width:380px">
+    <p class="muted small" style="margin:0">Signed in as ${esc(me.email)}</p>
+    <label>New password<input type="password" name="p1" minlength="8" required autocomplete="new-password"></label>
+    <label>Type it again<input type="password" name="p2" minlength="8" required autocomplete="new-password"></label>
+    <button>Change password</button></form>`;
+  document.getElementById('pw').onsubmit = async (e) => {
+    e.preventDefault(); const f = e.target;
+    if (f.p1.value !== f.p2.value) return toast('The two passwords don\'t match');
+    const { error } = await sb.auth.updateUser({ password: f.p1.value });
+    toast(error ? error.message : 'Password changed'); if (!error) f.reset();
+  };
+}
+
 // ---------- boot ----------
 if (!cfg.supabaseUrl) { $app.innerHTML = '<p>Missing config.js (Supabase URL and public key).</p>'; }
-else { const { data } = await sb.auth.getSession(); me = data.session?.user || null; ['nav', 'quicksearch', 'signout'].forEach((id) => (document.getElementById(id).hidden = !me)); route(); }
+else { const { data } = await sb.auth.getSession(); me = data.session?.user || null; ['nav', 'quicksearch', 'signout', 'settingslink'].forEach((id) => (document.getElementById(id).hidden = !me)); route(); }

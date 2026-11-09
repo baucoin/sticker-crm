@@ -8,7 +8,11 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/mcp')) return handleMcp(req, env, url);
-    return env.ASSETS.fetch(req);
+    if (env.ASSETS) return env.ASSETS.fetch(req);
+    // Fallback when deployed as a single bundled file (scripts/bundle.mjs embeds /public)
+    const f = globalThis.__STATIC?.[url.pathname === '/' ? '/index.html' : url.pathname];
+    if (!f) return new Response('Not found', { status: 404 });
+    return new Response(f.body, { headers: { 'Content-Type': f.type, 'Cache-Control': 'no-cache' } });
   },
 };
 

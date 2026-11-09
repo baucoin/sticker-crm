@@ -91,6 +91,8 @@ for r in rows:
     if r['floodHold']: tags.append('flood hold')
     if r['batch']: tags.append(r['batch'])
     stores[sid] = s
+    if s['highrise_id'] and str(s['highrise_id']) in by_hr:   # two tracker rows point at one Highrise company
+        s['extra']['highriseId'] = s['highrise_id']; s['highrise_id'] = None
     if s['highrise_id']: by_hr[str(s['highrise_id'])] = sid
     by_norm.setdefault(norm(s['name']), sid)
     if r['contact'] and r['contact'].strip():
