@@ -8,6 +8,7 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/mcp')) return handleMcp(req, env, url);
+    if (url.pathname.startsWith('/api/')) return handleApi(req, env, url);
     if (url.pathname.startsWith('/_deploy/')) return new Response('Not found', { status: 404 });
     if (env.ASSETS) return env.ASSETS.fetch(req);
     return siteFile(env, url.pathname === '/' ? '/index.html' : url.pathname);
@@ -314,6 +315,30 @@ const TOOLS = [
     },
   },
 ];
+
+// ---------- Plain HTTP API (for chats without the connector, e.g. a desktop scheduled task using Chrome) ----------
+// GET or POST /api/<MCP_SECRET>/<tool>?arg=value...  (POST may send a JSON body instead). GET /api/<secret>/ lists tools.
+async function handleApi(req, env, url) {
+  const [, , secret, name] = url.pathname.split('/');
+  if (!env.MCP_SECRET || secret !== env.MCP_SECRET) return new Response('Not found', { status: 404 });
+  const pretty = (o, status = 200) => new Response(JSON.stringify(o, null, 1), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' } });
+  if (!name) return pretty({ usage: 'GET /api/<secret>/<tool>?param=value (arrays as JSON or comma-separated). POST with a JSON body also works.',
+    tools: TOOLS.map((t) => ({ name: t.name, description: t.description, params: Object.fromEntries(Object.entries(t.inputSchema.properties || {}).map(([k, v]) => [k, v.type + (t.inputSchema.required?.includes(k) ? ' (required)' : '')])) })) });
+  const tool = TOOLS.find((t) => t.name === name);
+  if (!tool) return pretty({ error: `Unknown tool ${name}` }, 404);
+  const props = tool.inputSchema.properties || {};
+  let args = {};
+  if (req.method === 'POST') { try { args = await req.json(); } catch { return pretty({ error: 'Body must be JSON' }, 400); } }
+  for (const [k, raw] of url.searchParams) {
+    const t = props[k]?.type; let v = raw;
+    if (t === 'number') v = Number(raw);
+    else if (t === 'boolean') v = /^(1|true|yes)$/i.test(raw);
+    else if (t === 'array' || t === 'object') { try { v = JSON.parse(raw); } catch { v = t === 'array' ? raw.split(',').map((x) => x.trim()).filter(Boolean) : raw; } }
+    args[k] = v;
+  }
+  try { return pretty({ ok: true, result: await tool.run(env, args) }); }
+  catch (e) { return pretty({ ok: false, error: String(e.message || e) }, 400); }
+}
 
 // ---------- MCP (Streamable HTTP, JSON responses) ----------
 async function handleMcp(req, env, url) {
