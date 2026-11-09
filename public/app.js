@@ -40,6 +40,7 @@ const routes = [
   [/^#\/activity$/, viewActivity],
   [/^#\/search\/(.*)$/, viewSearch],
   [/^#\/settings$/, viewSettings],
+  [/^#\/playbook$/, viewPlaybook],
 ];
 async function route() {
   if (!me) return viewLogin();
@@ -488,6 +489,52 @@ async function viewSearch(q) {
     <div class="panel"><h2 style="margin-top:0">Stores (${stores.data?.length || 0})</h2>${(stores.data || []).map((x) => `<div class="task"><a href="#/store/${x.id}">${esc(x.name)}</a> ${storeTags(x)}<span class="muted small">${esc([x.city, x.state].filter(Boolean).join(', '))}</span></div>`).join('') || '<p class="muted small">None</p>'}</div>
     <div class="panel"><h2 style="margin-top:0">People (${people.data?.length || 0})</h2>${(people.data || []).map((x) => `<div class="task"><span>${esc(x.name)} <span class="muted small">${esc(x.email || '')}</span></span>${x.store_id ? `· <a href="#/store/${x.store_id}">${esc(x.stores?.name || '')}</a>` : ''}</div>`).join('') || '<p class="muted small">None</p>'}</div>
     <div class="panel"><h2 style="margin-top:0">Notes and emails (${notes.data?.length || 0})</h2>${(notes.data || []).map((x) => `<div class="task"><span><a href="#/store/${x.store_id}">${esc(x.stores?.name || '')}</a> <span class="muted small">${KINDS[x.kind] || x.kind} · ${fmtDate(x.occurred_at)}</span><div class="small">${hl(x.body || x.subject)}</div></span></div>`).join('') || '<p class="muted small">None</p>'}</div>`;
+}
+
+// ---------- Playbook, handoffs, wins ----------
+async function viewPlaybook() {
+  const [pb, ho, wins] = await Promise.all([
+    sb.from('playbook').select('*').order('sort'),
+    sb.from('handoffs').select('*').eq('status', 'open').order('created_on', { ascending: false }),
+    sb.from('wins').select('*').order('won_on', { ascending: false }).limit(200),
+  ]);
+  [pb, ho, wins].forEach((r) => fail(r.error));
+  const month = today().slice(0, 7);
+  const counted = wins.data.filter((w) => w.confidence === 'counted');
+  const thisMonth = counted.filter((w) => w.won_on.slice(0, 7) === month).reduce((a, w) => a + Number(w.amount || 0), 0);
+  $app.innerHTML = `<h1>Playbook</h1>
+  <div class="stats">
+    <div class="panel"><div class="muted small">Outreach wins this month</div><div class="stat">${money(thisMonth)}</div><div class="muted small">goal $1,000</div></div>
+    <div class="panel"><div class="muted small">All counted wins</div><div class="stat">${money(counted.reduce((a, w) => a + Number(w.amount || 0), 0))}</div><div class="muted small">${counted.length} orders</div></div>
+    <div class="panel"><div class="muted small">Open handoff notes</div><div class="stat">${ho.data.length}</div></div>
+  </div>
+  <div class="grid2"><div>
+    ${pb.data.map((x) => `<div class="panel" data-pb="${x.id}"><div class="row"><h2 style="margin:0">${esc(x.heading)}</h2><span class="spacer"></span><button class="link small" data-editpb="${x.id}">Edit</button></div>
+      <div class="body small" style="white-space:pre-wrap;margin-top:6px">${esc(x.body)}</div></div>`).join('')}
+    <button class="ghost" id="addpb">+ Add section</button>
+  </div><div>
+    <div class="panel"><h2 style="margin-top:0">Open handoff notes</h2>${ho.data.map((h) => `<div class="task" data-ho="${h.id}"><span><b>${esc(h.topic)}</b>
+      <div class="small muted">${esc(h.from_who || '')} → ${esc(h.to_who || 'all')} · ${fmtDate(h.created_on)}</div>${h.note ? `<div class="small" style="white-space:pre-wrap">${esc(h.note.length > 400 ? h.note.slice(0, 400) + '…' : h.note)}</div>` : ''}</span>
+      <span class="spacer"></span><button class="link small" data-closeho="${h.id}">Done</button></div>`).join('') || '<p class="muted small">None open.</p>'}
+      <form id="addho" class="stack" style="margin-top:8px"><input name="topic" placeholder="New note: topic" required><textarea name="note" placeholder="Details" style="min-height:50px"></textarea>
+      <div class="row"><input name="to" placeholder="To (e.g. daily-tasks, all)" value="all"><button>Add note</button></div></form></div>
+    <div class="panel"><h2 style="margin-top:0">Wins</h2>${wins.data.map((w) => `<div class="task"><span>${w.store_id ? `<a href="#/store/${w.store_id}">${esc(w.store_name)}</a>` : esc(w.store_name || '')}
+      <div class="small muted">${fmtDate(w.won_on)} · ${esc(w.channel || '')} · ${esc(w.contact_by || '')}${w.confidence !== 'counted' ? ' · possible' : ''}</div></span><span class="spacer"></span><b>${money(w.amount)}</b></div>`).join('') || '<p class="muted small">None yet.</p>'}</div>
+  </div></div>`;
+  const editForm = (x = {}) => `<form class="stack"><input name="heading" value="${esc(x.heading)}" placeholder="Heading" required><textarea name="body" style="min-height:160px">${esc(x.body)}</textarea>
+    <div class="row"><button>Save</button><button type="button" class="ghost" data-cancel>Cancel</button>${x.id ? '<span class="spacer"></span><button type="button" class="danger" data-del>Delete</button>' : ''}</div></form>`;
+  const bindEdit = (box, x) => {
+    const f = box.querySelector('form');
+    f.onsubmit = async (e) => { e.preventDefault(); const rec = { heading: f.heading.value.trim(), body: f.body.value };
+      fail((x ? await sb.from('playbook').update(rec).eq('id', x.id) : await sb.from('playbook').insert({ ...rec, sort: 1000 })).error); toast('Saved'); viewPlaybook(); };
+    f.querySelector('[data-cancel]').onclick = viewPlaybook;
+    f.querySelector('[data-del]')?.addEventListener('click', async () => { if (confirm('Delete this section?')) { fail((await sb.from('playbook').delete().eq('id', x.id)).error); viewPlaybook(); } });
+  };
+  document.querySelectorAll('[data-editpb]').forEach((b) => (b.onclick = () => { const x = pb.data.find((y) => y.id === b.dataset.editpb); const box = document.querySelector(`[data-pb="${x.id}"]`); box.innerHTML = editForm(x); bindEdit(box, x); }));
+  document.getElementById('addpb').onclick = (e) => { const box = document.createElement('div'); box.className = 'panel'; box.innerHTML = editForm(); e.target.before(box); bindEdit(box, null); };
+  document.querySelectorAll('[data-closeho]').forEach((b) => (b.onclick = async () => { fail((await sb.from('handoffs').update({ status: 'done', done_by: 'Bryant', done_on: today() }).eq('id', b.dataset.closeho)).error); toast('Marked done'); viewPlaybook(); }));
+  document.getElementById('addho').onsubmit = async (e) => { e.preventDefault(); const f = e.target;
+    fail((await sb.from('handoffs').insert({ from_who: 'bryant', to_who: f.to.value.trim() || 'all', topic: f.topic.value.trim(), note: f.note.value || null, created_on: today() })).error); toast('Added'); viewPlaybook(); };
 }
 
 // ---------- Settings ----------

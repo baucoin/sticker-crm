@@ -8,13 +8,19 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/mcp')) return handleMcp(req, env, url);
+    if (url.pathname.startsWith('/_deploy/')) return new Response('Not found', { status: 404 });
     if (env.ASSETS) return env.ASSETS.fetch(req);
-    // Fallback when deployed as a single bundled file (scripts/bundle.mjs embeds /public)
-    const f = globalThis.__STATIC?.[url.pathname === '/' ? '/index.html' : url.pathname];
-    if (!f) return new Response('Not found', { status: 404 });
-    return new Response(f.body, { headers: { 'Content-Type': f.type, 'Cache-Control': 'no-cache' } });
+    return siteFile(env, url.pathname === '/' ? '/index.html' : url.pathname);
   },
 };
+
+// Fallback for deploys without the static-assets binding: site files are kept in the site_files table
+// (scripts/publish_site.py uploads /public there).
+async function siteFile(env, path) {
+  const rows = await db(env, `site_files?path=eq.${encodeURIComponent(path)}&select=content_type,body`).catch(() => []);
+  if (!rows?.length) return new Response('Not found', { status: 404 });
+  return new Response(rows[0].body, { headers: { 'Content-Type': rows[0].content_type, 'Cache-Control': 'no-cache' } });
+}
 
 // ---------- Supabase REST helper ----------
 async function db(env, path, { method = 'GET', body, prefer } = {}) {
@@ -233,6 +239,65 @@ const TOOLS = [
       return db(env, `timeline?select=kind,occurred_at,author,subject,body,store_id,stores(name)${a.since ? `&occurred_at=gte.${a.since}` : ''}${a.author ? `&author=ilike.${enc(a.author)}` : ''}&order=occurred_at.desc&limit=${Math.min(a.limit || 30, 200)}`);
     },
   },
+  {
+    name: 'get_playbook',
+    description: 'Read the outreach playbook: standing rules, priorities, who-does-what. Read it at the start of every outreach run.',
+    inputSchema: { type: 'object', properties: {} },
+    async run(env) { return db(env, 'playbook?select=heading,body,updated_at&order=sort'); },
+  },
+  {
+    name: 'update_playbook',
+    description: 'Replace (or add) one playbook section by heading. Only change the playbook when Bryant asks.',
+    inputSchema: { type: 'object', properties: { heading: { type: 'string' }, body: { type: 'string' }, sort: { type: 'number' } }, required: ['heading', 'body'] },
+    async run(env, a) { return db(env, 'playbook?on_conflict=heading', { method: 'POST', prefer: 'return=representation,resolution=merge-duplicates', body: { heading: a.heading, body: a.body, ...(a.sort != null ? { sort: a.sort } : {}) } }); },
+  },
+  {
+    name: 'list_handoffs',
+    description: 'Handoff notes between Claude chats/threads. Default: open notes addressed to "to" or to all.',
+    inputSchema: { type: 'object', properties: { to: { type: 'string', description: 'e.g. daily-tasks, faire-chat, win-backs' }, status: { type: 'string', enum: ['open', 'done', 'any'] }, limit: { type: 'number' } } },
+    async run(env, a) {
+      const f = ['select=id,slug,created_on,from_who,to_who,topic,note,status,progress_note,store_slugs,done_by,done_on,done_note', 'order=created_on.desc', `limit=${Math.min(a.limit || 50, 200)}`];
+      if ((a.status || 'open') !== 'any') f.push(`status=eq.${a.status || 'open'}`);
+      if (a.to) f.push(`to_who=in.(${enc(a.to)},all)`);
+      return db(env, `handoffs?${f.join('&')}`);
+    },
+  },
+  {
+    name: 'add_handoff',
+    description: 'Leave a handoff note for another chat/thread (or "all").',
+    inputSchema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, topic: { type: 'string' }, note: { type: 'string' }, store_slugs: { type: 'array', items: { type: 'string' } } }, required: ['from', 'topic'] },
+    async run(env, a) { return db(env, 'handoffs', { method: 'POST', body: { from_who: a.from, to_who: a.to || 'all', topic: a.topic, note: a.note || null, store_slugs: a.store_slugs || [], created_on: today() } }); },
+  },
+  {
+    name: 'close_handoff',
+    description: 'Mark a handoff note done (or add a progress note while keeping it open).',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, by: { type: 'string' }, note: { type: 'string' }, keep_open: { type: 'boolean' } }, required: ['id'] },
+    async run(env, a) {
+      const body = a.keep_open ? { progress_note: a.note || null } : { status: 'done', done_by: a.by || 'claude', done_on: today(), done_note: a.note || null };
+      return db(env, `handoffs?id=eq.${a.id}`, { method: 'PATCH', body });
+    },
+  },
+  {
+    name: 'record_win',
+    description: 'Credit an order to outreach (an order that followed a personal email or Faire message within 60 days; blasts excluded). Feeds the $1,000/month goal.',
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, amount: { type: 'number' }, channel: { type: 'string' }, order_no: { type: 'string' }, won_on: { type: 'string' },
+      contact_by: { type: 'string' }, contact_on: { type: 'string' }, contact_via: { type: 'string' }, confidence: { type: 'string', enum: ['counted', 'possible'] }, note: { type: 'string' } }, required: ['store', 'amount'] },
+    async run(env, a) {
+      const s = await findStore(env, a.store);
+      return db(env, 'wins', { method: 'POST', body: { store_id: s.id, store_name: s.name, amount: a.amount, channel: a.channel || s.channel, order_no: a.order_no || null, won_on: a.won_on || today(),
+        contact_by: a.contact_by || null, contact_on: a.contact_on || null, contact_via: a.contact_via || null, confidence: a.confidence || 'counted', note: a.note || null } });
+    },
+  },
+  {
+    name: 'list_wins',
+    description: 'Orders credited to outreach, newest first, with the monthly total.',
+    inputSchema: { type: 'object', properties: { since: { type: 'string', description: 'YYYY-MM-DD' } } },
+    async run(env, a) {
+      const rows = await db(env, `wins?select=won_on,store_name,amount,channel,confidence,contact_by,order_no,note${a.since ? `&won_on=gte.${a.since}` : ''}&order=won_on.desc&limit=500`);
+      const byMonth = {}; rows.forEach((w) => { if (w.confidence === 'counted') byMonth[w.won_on.slice(0, 7)] = (byMonth[w.won_on.slice(0, 7)] || 0) + Number(w.amount || 0); });
+      return { counted_by_month: byMonth, wins: rows };
+    },
+  },
 ];
 
 // ---------- MCP (Streamable HTTP, JSON responses) ----------
@@ -258,7 +323,7 @@ async function handleRpc(env, m) {
   switch (m.method) {
     case 'initialize':
       return ok({ protocolVersion: m.params?.protocolVersion || '2025-06-18', capabilities: { tools: {} }, serverInfo: SERVER_INFO,
-        instructions: 'Sticker Art wholesale CRM: stores (retailers), their people, a timeline of notes/emails/calls/Faire messages/orders, tasks and orders. Read a store with get_store before contacting it; log every outreach or reply with log_activity.' });
+        instructions: 'Sticker Art wholesale CRM: stores (retailers), their people, a timeline of notes/emails/calls/Faire messages/orders, tasks and orders. Read a store with get_store before contacting it; log every outreach or reply with log_activity. Start each outreach run with get_playbook and list_handoffs.' });
     case 'ping': return ok({});
     case 'tools/list': return ok({ tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
     case 'tools/call': {

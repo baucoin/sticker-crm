@@ -161,3 +161,30 @@ do $$ declare t text; begin
 end $$;
 -- After creating the project, set the secret once:
 --   insert into private.settings values ('crm_key', '<long random string>') on conflict (key) do update set value = excluded.value;
+
+-- Only these signed-in emails can use the app (sign-ups by anyone else see nothing)
+insert into private.settings values ('allowed_emails', 'bryantaucoin@gmail.com') on conflict (key) do nothing;
+create or replace function public.crm_user_ok() returns boolean language sql stable security definer set search_path = '' as $$
+  select coalesce(lower(auth.jwt() ->> 'email') = any (string_to_array((select value from private.settings where key = 'allowed_emails'), ',')), false)
+$$;
+-- (policies signed_in_all use public.crm_user_ok() instead of true)
+
+-- Website files, used only when the Worker runs without its static-assets binding
+create table if not exists public.site_files (path text primary key, content_type text not null, body text not null, updated_at timestamptz not null default now());
+alter table public.site_files enable row level security;
+create policy machine_key on public.site_files for all to anon using (public.crm_key_ok()) with check (public.crm_key_ok());
+
+-- Outreach playbook, handoff notes between Claude chats, and wins (orders credited to outreach)
+create table if not exists public.playbook (
+  id uuid primary key default gen_random_uuid(), heading text not null unique, body text not null default '',
+  sort int not null default 100, updated_at timestamptz not null default now());
+create table if not exists public.handoffs (
+  id uuid primary key default gen_random_uuid(), slug text unique, created_on date not null default current_date,
+  from_who text, to_who text default 'all', topic text not null, note text, status text not null default 'open',
+  done_by text, done_on date, done_note text, progress_note text, store_slugs text[] not null default '{}',
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+create table if not exists public.wins (
+  id uuid primary key default gen_random_uuid(), slug text unique, store_id uuid references public.stores(id) on delete set null,
+  store_name text, amount numeric(12,2), channel text, confidence text default 'counted', contact_by text, contact_on date,
+  contact_via text, won_on date not null default current_date, order_no text, note text, created_at timestamptz not null default now());
+-- (same signed_in_all / machine_key policies as the other tables)
