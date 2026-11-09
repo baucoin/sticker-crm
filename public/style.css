@@ -60,6 +60,12 @@ tr:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; overflow-wrap: anywhere; }
 .task { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
 .task > span { min-width: 0; }
+.task-body { flex: 1; }
+.task-store { font-weight: 600; display: block; }
+.task-change { white-space: nowrap; flex: none; }
+.task-menu { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.task-menu[hidden] { display: none; }
+.task-menu button { white-space: nowrap; }
 .task:last-child { border-bottom: 0; }
 .overdue { color: var(--danger); font-weight: 600; }
 .due-today { color: var(--warn); font-weight: 600; }

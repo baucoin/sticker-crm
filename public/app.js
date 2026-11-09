@@ -146,15 +146,17 @@ async function viewToday() {
 }
 
 function taskRow(t) {
+  const store = t.stores ? `<a class="task-store" href="#/store/${t.stores.id}">${esc(t.stores.name)}</a>` : '';
   return `<div class="task" data-task="${t.id}" data-due="${esc(t.due_date || '')}" data-title="${esc(t.title)}" data-cat="${esc(t.category || '')}">
     <input type="checkbox" title="Mark done" ${t.done_at ? 'checked' : ''}>
-    <span><span>${esc(t.title)}</span>
-      ${t.stores ? ` · <a href="#/store/${t.stores.id}">${esc(t.stores.name)}</a>` : ''}
-      <div class="small muted">${t.category ? esc(t.category) + ' · ' : ''}<span class="${dueClass(t.due_date)}">${t.due_date ? 'due ' + fmtDate(t.due_date) : 'no date'}</span></div></span>
-    <span class="spacer"></span>
-    <button class="link small" data-act="snooze" title="Push one day">+1d</button>
-    <button class="link small" data-act="week" title="Push one week">+1w</button>
-    <button class="link small" data-act="edit" title="Edit or delete">Edit</button>
+    <span class="task-body">${store}
+      <div class="task-title">${esc(t.title)}</div>
+      <div class="small muted"><span class="${dueClass(t.due_date)}">${t.due_date ? 'Due ' + fmtDate(t.due_date) : 'No date'}</span>${t.category ? ' · ' + esc(t.category) : ''} · <button class="link small task-change" data-toggle title="Reschedule, edit or delete">Change</button></div>
+      <div class="task-menu" hidden>
+        <button class="ghost small" data-act="snooze">Move to tomorrow</button>
+        <button class="ghost small" data-act="week">Move a week later</button>
+        <button class="ghost small" data-act="edit">Edit or delete</button>
+      </div></span>
   </div>`;
 }
 function bindTaskRows(onChange) {
@@ -172,6 +174,8 @@ function bindTaskRows(onChange) {
       toast(done ? 'Done' : 'Reopened');
       onChange ? onChange() : el.style.opacity = done ? .45 : 1;
     };
+    const tg = el.querySelector('[data-toggle]');
+    if (tg) tg.onclick = () => { const m = el.querySelector('.task-menu'); m.hidden = !m.hidden; tg.textContent = m.hidden ? 'Change' : 'Close'; };
     el.querySelectorAll('[data-act]').forEach((b) => b.onclick = async () => {
       if (b.dataset.act === 'edit') return editTask(el, id, onChange);
       const cur = el.dataset.due; const base = cur && cur > today() ? cur : today(); // push from the task's own date (or today if it's overdue)
