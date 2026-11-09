@@ -101,13 +101,16 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { store: { type: 'string', description: 'Store id, slug or exact/partial name' }, timeline_limit: { type: 'number' } }, required: ['store'] },
     async run(env, a) {
       const s = await findStore(env, a.store);
-      const [contacts, tasks, orders, timeline] = await Promise.all([
+      const root = s.parent_id || s.id;
+      const [contacts, tasks, orders, timeline, related] = await Promise.all([
         db(env, `contacts?store_id=eq.${s.id}&select=id,name,title,email,phone,background`),
         db(env, `tasks?store_id=eq.${s.id}&done_at=is.null&select=id,title,category,due_date&order=due_date`),
         db(env, `orders?store_id=eq.${s.id}&select=channel,order_no,ordered_at,total&order=ordered_at.desc&limit=50`),
         db(env, `timeline?store_id=eq.${s.id}&select=id,kind,occurred_at,author,subject,body,source&order=occurred_at.desc&limit=${Math.min(a.timeline_limit || 40, 500)}`),
+        db(env, `stores?or=(id.eq.${root},parent_id.eq.${root})&id=neq.${s.id}&select=id,name,city,state,parent_id`),
       ]);
-      return { store: s, contacts, open_tasks: tasks, orders, timeline };
+      const related_stores = related.map((r) => ({ ...r, relation: r.id === s.parent_id ? 'parent account' : r.parent_id === s.id ? 'location of this store' : 'same parent account' }));
+      return { store: s, related_stores, contacts, open_tasks: tasks, orders, timeline };
     },
   },
   {
@@ -190,10 +193,11 @@ const TOOLS = [
   {
     name: 'update_store',
     description: 'Change a store\'s fields: status, account status, channel, follow-up date, tags, key account, holdout, archived, contact info, background.',
-    inputSchema: { type: 'object', properties: { store: { type: 'string' }, ...STORE_FIELDS, archived: { type: 'boolean', description: 'Archive (hide from lists) or bring back' }, add_tags: { type: 'array', items: { type: 'string' } }, remove_tags: { type: 'array', items: { type: 'string' } } }, required: ['store'] },
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, ...STORE_FIELDS, archived: { type: 'boolean', description: 'Archive (hide from lists) or bring back' }, parent_store: { type: 'string', description: 'Link this store as a location of another store (id, slug or name); empty string unlinks' }, add_tags: { type: 'array', items: { type: 'string' } }, remove_tags: { type: 'array', items: { type: 'string' } } }, required: ['store'] },
     async run(env, a) {
       const s = await findStore(env, a.store);
       const upd = pick(a, Object.keys(STORE_FIELDS));
+      if (a.parent_store != null) upd.parent_id = a.parent_store === '' ? null : (await findStore(env, a.parent_store)).id;
       if (a.archived != null) upd.archived_at = a.archived ? new Date().toISOString() : null;
       if (a.add_tags || a.remove_tags) {
         const t = new Set(upd.tags || s.tags || []);

@@ -341,6 +341,13 @@ async function viewStore(id) {
   if (seq !== routeSeq) return;
   if (st.error) { $app.innerHTML = '<p>Store not found.</p>'; return; }
   const s = st.data;
+  const relQ = [`id.eq.${s.parent_id || s.id}`, `parent_id.eq.${s.parent_id || s.id}`].join(',');
+  const rel = ((await sb.from('stores').select('id,name,city,state,parent_id').or(relQ).neq('id', s.id).order('name')).data) || [];
+  if (seq !== routeSeq) return;
+  const parent = s.parent_id ? rel.find((r) => r.id === s.parent_id) : null;
+  const kids = rel.filter((r) => r.parent_id === s.id);
+  const sibs = s.parent_id ? rel.filter((r) => r.parent_id === s.parent_id) : [];
+  const rl = (r) => `<a href="#/store/${r.id}">${esc(r.name)}</a>${r.city ? ` <span class="muted small">${esc(r.city)}</span>` : ''}`;
   const openTasks = tasks.data.filter((t) => !t.done_at);
   const spend = orders.data.reduce((a, o) => a + Number(o.total || 0), 0);
   const ex = s.extra || {};
@@ -348,6 +355,7 @@ async function viewStore(id) {
   $app.innerHTML = `
   <div class="row"><h1 style="margin-bottom:2px">${esc(s.name)}</h1><span class="spacer"></span><button class="ghost" id="editbtn">Edit</button></div>
   <div style="margin-bottom:12px">${storeTags(s)} <span class="muted small">${esc([s.city, s.state].filter(Boolean).join(', '))}</span></div>
+  ${parent || kids.length ? `<div class="panel related-banner">${parent ? `Location of <b>${rl(parent)}</b>${sibs.length ? `. Other locations: ${sibs.map(rl).join(', ')}` : ''}` : `Parent account. Locations: ${kids.map(rl).join(', ')}`}</div>` : ''}
   <div class="grid2">
     <div>
       <form class="panel" id="addnote">
@@ -395,6 +403,13 @@ async function viewStore(id) {
           <select name="category">${CATEGORIES.map((c) => `<option>${c}</option>`).join('')}</select>
           <button>Add</button>
         </form>
+      </div>
+      <div class="panel"><div class="row"><h2 style="margin:0">Related stores</h2><span class="spacer"></span><button class="link" id="linkrel">+ Link</button></div>
+        ${parent ? `<div class="task"><span>Part of ${rl(parent)}</span><span class="spacer"></span><button class="link small" data-unlink="${s.id}">Unlink</button></div>` : ''}
+        ${kids.map((k) => `<div class="task"><span>Location: ${rl(k)}</span><span class="spacer"></span><button class="link small" data-unlink="${k.id}">Unlink</button></div>`).join('')}
+        ${sibs.map((k) => `<div class="task"><span class="muted small">Same account:</span> <span>${rl(k)}</span></div>`).join('')}
+        ${!parent && !kids.length ? '<p class="muted small">Not linked to other stores. Use Link for chains or one owner with several locations.</p>' : ''}
+        <div id="relbox" hidden><input type="search" id="relq" placeholder="Search for the related store…" style="width:100%;margin-top:6px"><div id="relres"></div></div>
       </div>
       <div class="panel"><div class="row"><h2 style="margin:0">People</h2><span class="spacer"></span><button class="link" id="addperson">+ Add</button></div>
         <div id="people">${contacts.data.map((c) => `<div class="task" data-person="${c.id}"><span><b>${esc(c.name)}</b>${c.title ? ` <span class="muted small">${esc(c.title)}</span>` : ''}
@@ -498,6 +513,24 @@ async function viewStore(id) {
     document.getElementById('pf')?.remove(); const c = contacts.data.find((x) => x.id === b.dataset.editperson);
     document.querySelector(`[data-person="${c.id}"]`).insertAdjacentHTML('afterend', personForm(c)); bindPerson(c);
   }));
+  document.querySelectorAll('[data-unlink]').forEach((b) => (b.onclick = async () => {
+    fail((await sb.from('stores').update({ parent_id: null }).eq('id', b.dataset.unlink)).error); toast('Unlinked'); viewStore(id);
+  }));
+  document.getElementById('linkrel').onclick = () => { const bx = document.getElementById('relbox'); bx.hidden = !bx.hidden; if (!bx.hidden) document.getElementById('relq').focus(); };
+  let relT;
+  document.getElementById('relq').oninput = (e) => { clearTimeout(relT); relT = setTimeout(async () => {
+    const q = e.target.value.trim(); const box = document.getElementById('relres'); if (q.length < 2) { box.innerHTML = ''; return; }
+    const { data } = await sb.from('stores').select('id,name,city,state,parent_id').or(orIlike(['name', 'city'], q)).neq('id', id).order('name').limit(12);
+    box.innerHTML = (data || []).map((r) => `<div class="task"><span>${rl(r)}</span><span class="spacer"></span>
+      <button class="link small" data-rel="${r.id}" data-how="child">Is a location of this</button>
+      <button class="link small" data-rel="${r.id}" data-how="parent">Is the parent of this</button></div>`).join('') || '<p class="muted small">No matches</p>';
+    box.querySelectorAll('[data-rel]').forEach((b) => (b.onclick = async () => {
+      const other = b.dataset.rel;
+      const r = b.dataset.how === 'child' ? await sb.from('stores').update({ parent_id: s.parent_id && s.parent_id !== other ? s.parent_id : id }).eq('id', other)
+        : await sb.from('stores').update({ parent_id: other }).eq('id', id);
+      fail(r.error); toast('Linked'); viewStore(id);
+    }));
+  }, 250); };
   document.getElementById('archstore').onclick = async () => {
     fail((await sb.from('stores').update({ archived_at: s.archived_at ? null : new Date().toISOString() }).eq('id', id)).error);
     toast(s.archived_at ? 'Back in the active list' : 'Archived. It stays searchable, and the Archived filter shows it.'); viewStore(id);

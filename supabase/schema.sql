@@ -195,3 +195,7 @@ create or replace function unarchive_on_order() returns trigger language plpgsql
 begin update stores set archived_at = null where id = new.store_id and archived_at is not null; return new; end $$;
 create trigger orders_unarchive after insert on orders for each row execute function unarchive_on_order();
 -- store_list view gained archived_at as its last column.
+
+-- Related stores (11/9): one owner/chain with several locations. A location points at its parent account.
+alter table stores add column if not exists parent_id uuid references stores(id) on delete set null;
+create index if not exists stores_parent_idx on stores(parent_id);

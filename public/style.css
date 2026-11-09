@@ -90,3 +90,6 @@ form.stack label { display: flex; flex-direction: column; gap: 3px; font-size: 1
   h1 { font-size: 19px; }
 }
 button:disabled { opacity: .6; cursor: default; }
+
+.related-banner { padding: 8px 12px; margin-bottom: 12px; border-left: 3px solid var(--accent, #2f6f4f); }
+.related-banner a { font-weight: 600; }
