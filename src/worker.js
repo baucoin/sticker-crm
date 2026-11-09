@@ -282,7 +282,7 @@ const TOOLS = [
     name: 'add_handoff',
     description: 'Leave a handoff note for another chat/thread (or "all").',
     inputSchema: { type: 'object', properties: { from: { type: 'string' }, to: { type: 'string' }, topic: { type: 'string' }, note: { type: 'string' }, store_slugs: { type: 'array', items: { type: 'string' } } }, required: ['from', 'topic'] },
-    async run(env, a) { return db(env, 'handoffs', { method: 'POST', body: { from_who: a.from, to_who: a.to || 'all', topic: a.topic, note: a.note || null, store_slugs: a.store_slugs || [], created_on: today() } }); },
+    async run(env, a) { return db(env, 'handoffs', { method: 'POST', body: { slug: `${today()}-${a.from}-${String(a.topic).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)}`, from_who: a.from, to_who: a.to || 'all', topic: a.topic, note: a.note || null, store_slugs: a.store_slugs || [], created_on: today() } }); },
   },
   {
     name: 'close_handoff',
