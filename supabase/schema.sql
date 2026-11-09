@@ -142,3 +142,22 @@ do $$ declare t text; begin
   end loop;
 end $$;
 alter view store_list set (security_invoker = true);
+
+-- Machine access (the Claude connector and import scripts) without the Supabase service key:
+-- requests that carry the header  x-crm-key: <secret>  may read and write. The secret lives in a private table.
+create schema if not exists private;
+create table if not exists private.settings (key text primary key, value text not null);
+revoke all on schema private from anon, authenticated;
+create or replace function public.crm_key_ok() returns boolean language sql stable security definer set search_path = '' as $$
+  select coalesce(
+    (current_setting('request.headers', true)::json ->> 'x-crm-key') =
+    (select value from private.settings where key = 'crm_key'), false)
+$$;
+do $$ declare t text; begin
+  foreach t in array array['stores','contacts','timeline','tasks','orders'] loop
+    execute format('drop policy if exists machine_key on %I', t);
+    execute format('create policy machine_key on %I for all to anon using (public.crm_key_ok()) with check (public.crm_key_ok())', t);
+  end loop;
+end $$;
+-- After creating the project, set the secret once:
+--   insert into private.settings values ('crm_key', '<long random string>') on conflict (key) do update set value = excluded.value;

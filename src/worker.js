@@ -1,6 +1,6 @@
 // Cloudflare Worker: serves the CRM web app (static files in /public) and an MCP server at /mcp/<MCP_SECRET>
 // so Claude can read and log to the CRM. Secrets (set with `wrangler secret put`):
-//   SUPABASE_URL, SUPABASE_SERVICE_KEY, MCP_SECRET
+//   SUPABASE_URL, SUPABASE_ANON_KEY, CRM_KEY (matches private.settings crm_key), MCP_SECRET
 
 const SERVER_INFO = { name: 'sticker-art-crm', version: '1.0.0' };
 
@@ -17,7 +17,7 @@ async function db(env, path, { method = 'GET', body, prefer } = {}) {
   const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${path}`, {
     method,
     headers: {
-      apikey: env.SUPABASE_SERVICE_KEY, Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      apikey: env.SUPABASE_ANON_KEY, Authorization: `Bearer ${env.SUPABASE_ANON_KEY}`, 'x-crm-key': env.CRM_KEY,
       'Content-Type': 'application/json', Prefer: prefer || 'return=representation',
     },
     body: body ? JSON.stringify(body) : undefined,

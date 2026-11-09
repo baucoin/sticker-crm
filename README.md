@@ -23,7 +23,8 @@ Bryant's own replacement for Highrise and the Outreach Tracker.
 npm install -g wrangler
 wrangler login
 wrangler secret put SUPABASE_URL
-wrangler secret put SUPABASE_SERVICE_KEY
+wrangler secret put SUPABASE_ANON_KEY
+wrangler secret put CRM_KEY
 wrangler secret put MCP_SECRET
 wrangler deploy
 ```
