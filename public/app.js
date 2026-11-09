@@ -60,6 +60,7 @@ async function route() {
   if (!me) return viewLogin();
   const h = location.hash || '#/';
   const seq = ++routeSeq;
+  document.body.classList.remove('wide');
   if (!h.startsWith('#/search/')) document.querySelector('#quicksearch input').value = '';
   document.querySelectorAll('nav a').forEach((a) => a.classList.toggle('on', a.getAttribute('href') === h.split('?')[0]));
   for (const [re, fn] of routes) {
@@ -150,6 +151,7 @@ sb.auth.onAuthStateChange((_ev, session) => {
 // ---------- Today ----------
 async function viewToday() {
   const seq = routeSeq;
+  document.body.classList.add('wide');
   const t = today();
   const [tasks, follow, recent, ordersRecent] = await Promise.all([
     sb.from('tasks').select('*, stores(id,name,slug)').is('done_at', null).lte('due_date', t).order('due_date').limit(200),
@@ -164,7 +166,7 @@ async function viewToday() {
   if (seq !== routeSeq) return;
   $app.innerHTML = `
   <h1>Today <span class="muted small">${fmtDate(t)}</span></h1>
-  <div class="grid2">
+  <div class="grid3">
     <div>
       <div class="panel"><h2 style="margin-top:0">Tasks due (${tasks.data.length})</h2>
         ${tasks.data.length ? tasks.data.map(taskRow).join('') : '<p class="muted">Nothing due. Nice.</p>'}
@@ -174,12 +176,14 @@ async function viewToday() {
       </div>
     </div>
     <div>
+      <div class="panel"><h2 style="margin-top:0">Latest activity</h2>${recent.data.map((e) => `
+        <div class="task"><span><a href="#/store/${e.store_id}">${esc(e.stores?.name || '')}</a> <span class="muted small">${KINDS[e.kind] || e.kind} · ${fmtDate(e.occurred_at)}</span>
+        <div class="small">${esc(((e.subject && !/^Outreach Tracker/.test(e.subject) ? e.subject : e.body) || e.subject || '').slice(0, 140))}</div></span></div>`).join('')}</div>
+    </div>
+    <div>
       <div class="panel"><h2 style="margin-top:0">Coming up</h2>${upcoming.data?.length ? upcoming.data.map(taskRow).join('') : '<p class="muted">No upcoming tasks.</p>'}</div>
       <div class="panel"><h2 style="margin-top:0">Latest orders</h2>${ordersRecent.data.map((o) => `
         <div class="task"><span>${o.stores ? `<a href="#/store/${o.stores.id}">${esc(o.stores.name)}</a>` : esc(o.customer_name || '')}<div class="muted small">${esc(o.channel)} ${esc(o.order_no || '')} · ${fmtDate(o.ordered_at)}</div></span><span class="spacer"></span><b>${money(o.total)}</b></div>`).join('') || '<p class="muted">None yet.</p>'}</div>
-      <div class="panel"><h2 style="margin-top:0">Latest activity</h2>${recent.data.map((e) => `
-        <div class="task"><span><a href="#/store/${e.store_id}">${esc(e.stores?.name || '')}</a> <span class="muted small">${KINDS[e.kind] || e.kind} · ${fmtDate(e.occurred_at)}</span>
-        <div class="small">${esc((e.subject || e.body || '').slice(0, 120))}</div></span></div>`).join('')}</div>
     </div>
   </div>`;
   bindTaskRows(); bindFollowRows(viewToday);
