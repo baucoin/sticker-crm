@@ -49,6 +49,7 @@ const routes = [
   [/^#\/stores\/new$/, viewNewStore],
   [/^#\/store\/([\w-]+)$/, viewStore],
   [/^#\/tasks$/, viewTasks],
+  [/^#\/followups$/, viewFollowups],
   [/^#\/orders$/, viewOrders],
   [/^#\/activity$/, viewActivity],
   [/^#\/search\/(.*)$/, viewSearch],
@@ -114,11 +115,13 @@ async function viewToday() {
   const t = today();
   const [tasks, follow, recent, ordersRecent] = await Promise.all([
     sb.from('tasks').select('*, stores(id,name,slug)').is('done_at', null).lte('due_date', t).order('due_date').limit(200),
-    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags').lte('next_follow_up', t).or('status.is.null,status.neq.skip').is('archived_at', null).order('next_follow_up').limit(200),
+    sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags,extra').lte('next_follow_up', t).or('status.is.null,status.neq.skip').is('archived_at', null).order('next_follow_up').limit(200),
     sb.from('timeline').select('id,kind,occurred_at,author,subject,body,store_id,stores(name)').order('occurred_at', { ascending: false }).limit(15),
     sb.from('orders').select('*, stores(id,name)').order('ordered_at', { ascending: false }).limit(8),
   ]);
   [tasks, follow, recent, ordersRecent].forEach((r) => fail(r.error));
+  const wk = addDays(t, 7);
+  const weekCount = (await sb.from('stores').select('id', { count: 'exact', head: true }).gt('next_follow_up', t).lte('next_follow_up', wk).or('status.is.null,status.neq.skip').is('archived_at', null)).count || 0;
   const upcoming = await sb.from('tasks').select('*, stores(id,name)').is('done_at', null).gt('due_date', t).order('due_date').limit(10);
   if (seq !== routeSeq) return;
   $app.innerHTML = `
@@ -128,10 +131,8 @@ async function viewToday() {
       <div class="panel"><h2 style="margin-top:0">Tasks due (${tasks.data.length})</h2>
         ${tasks.data.length ? tasks.data.map(taskRow).join('') : '<p class="muted">Nothing due. Nice.</p>'}
       </div>
-      <div class="panel"><h2 style="margin-top:0">Stores to follow up (${follow.data.length})</h2>
-        ${follow.data.length ? `<div class="tablewrap"><table><tbody>${follow.data.map((s) => `
-          <tr><td><a href="#/store/${s.id}">${esc(s.name)}</a> ${storeTags(s)}<div class="muted small">${esc([s.city, s.state].filter(Boolean).join(', '))} · ${esc(s.channel || '')} · ${esc(s.status || '')}</div></td>
-          <td class="${dueClass(s.next_follow_up)}" style="white-space:nowrap">${fmtDate(s.next_follow_up)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No follow-ups due.</p>'}
+      <div class="panel"><div class="row"><h2 style="margin:0">Follow-ups due (${follow.data.length})</h2><span class="spacer"></span><a href="#/followups">Next 7 days: ${weekCount} →</a></div>
+        ${follow.data.length ? follow.data.map(followRow).join('') : '<p class="muted">No follow-ups due today.</p>'}
       </div>
     </div>
     <div>
@@ -143,7 +144,7 @@ async function viewToday() {
         <div class="small">${esc((e.subject || e.body || '').slice(0, 120))}</div></span></div>`).join('')}</div>
     </div>
   </div>`;
-  bindTaskRows();
+  bindTaskRows(); bindFollowRows(viewToday);
 }
 
 function taskRow(t) {
@@ -198,6 +199,47 @@ async function editTask(el, id, onChange) {
     fail((await sb.from('tasks').update({ title: f.title.value.trim(), due_date: f.due.value || null, category: f.category.value }).eq('id', id)).error); toast('Saved'); redo(); };
   f.querySelector('[data-cancel]').onclick = redo;
   f.querySelector('[data-del]').onclick = async () => { if (confirm('Delete this task?')) { fail((await sb.from('tasks').delete().eq('id', id)).error); toast('Deleted'); redo(); } };
+}
+
+function addDays(d, n) { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toLocaleDateString('en-CA'); }
+function followReason(s) { const ex = s.extra || {}; return ex.nextTask || ex.lastNote || ''; }
+function followRow(s) {
+  const why = followReason(s);
+  return `<div class="task" data-fu="${s.id}" data-due="${esc(s.next_follow_up || '')}"><span class="task-body">
+    <a class="task-store" href="#/store/${s.id}">${esc(s.name)}</a>
+    ${why ? `<div class="task-title">${esc(why)}</div>` : ''}
+    <div class="small muted"><span class="${dueClass(s.next_follow_up)}">${fmtDate(s.next_follow_up)}</span> · ${esc([s.city, s.state].filter(Boolean).join(', '))} · ${esc(s.channel || '')}${s.status ? ' · ' + esc(s.status) : ''} ${storeTags(s)}
+      · <button class="link small" data-fuweek>Move a week later</button></div></span></div>`;
+}
+function bindFollowRows(redo) {
+  document.querySelectorAll('[data-fu] [data-fuweek]').forEach((b) => (b.onclick = async () => {
+    const el = b.closest('[data-fu]'); const base = el.dataset.due > today() ? el.dataset.due : today(); const d = addDays(base, 7);
+    fail((await sb.from('stores').update({ next_follow_up: d }).eq('id', el.dataset.fu)).error); toast('Moved to ' + fmtDate(d)); redo();
+  }));
+}
+
+// ---------- Follow-ups ----------
+async function viewFollowups() {
+  const seq = routeSeq;
+  const p = params(); const range = p.get('range') || 'week'; const t = today();
+  const ranges = { overdue: ['Overdue', null, addDays(t, -1)], today: ['Today', t, t], week: ['Next 7 days', t, addDays(t, 7)], month: ['Next 30 days', t, addDays(t, 30)], all: ['All upcoming', t, null] };
+  const [, from, to] = ranges[range] || ranges.week;
+  let q = sb.from('stores').select('id,name,city,state,next_follow_up,status,channel,key_account,holdout,tags,extra', { count: 'exact' })
+    .not('next_follow_up', 'is', null).or('status.is.null,status.neq.skip').is('archived_at', null).order('next_follow_up').order('name').limit(500);
+  if (from) q = q.gte('next_follow_up', from);
+  if (to) q = q.lte('next_follow_up', to);
+  if (p.get('key')) q = q.eq('key_account', true);
+  if (p.get('channel')) q = q.eq('channel', p.get('channel'));
+  const { data, count, error } = await q; fail(error);
+  if (seq !== routeSeq) return;
+  const link = (k, v, label) => { const n = params(); (n.get(k) === v || (k === 'range' && !n.get('range') && v === 'week')) ? (k !== 'range' && n.delete(k)) : n.set(k, v); const on = k === 'range' ? range === v : p.get(k) === v; return `<a class="chip ${on ? 'on' : ''}" href="#/followups?${n}">${label}</a>`; };
+  const groups = {}; data.forEach((s) => (groups[s.next_follow_up] ||= []).push(s));
+  $app.innerHTML = `<h1>Follow-ups</h1>
+    <div class="panel"><div class="chips">${Object.entries(ranges).map(([k, v]) => link('range', k, v[0])).join(' ')}</div>
+    <div class="chips" style="margin-top:6px">${link('key', '1', '★ Key accounts')} ${link('channel', 'faire', 'Faire')} ${link('channel', 'direct', 'Direct')} ${link('channel', 'both', 'Faire + direct')} ${link('channel', 'prospect', 'Prospects')}</div></div>
+    <p class="muted small">${count} store${count === 1 ? '' : 's'}${count > 500 ? ' (showing the first 500)' : ''}. Tasks with due dates are on the Tasks page.</p>
+    ${Object.entries(groups).map(([d, L]) => `<div class="panel"><h2 style="margin-top:0">${d === t ? 'Today' : fmtDate(d)} <span class="muted small">(${L.length})</span></h2>${L.map(followRow).join('')}</div>`).join('') || '<p class="muted">Nothing in this range.</p>'}`;
+  bindFollowRows(viewFollowups);
 }
 
 // ---------- Stores list ----------
