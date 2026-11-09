@@ -1,0 +1,272 @@
+// Cloudflare Worker: serves the CRM web app (static files in /public) and an MCP server at /mcp/<MCP_SECRET>
+// so Claude can read and log to the CRM. Secrets (set with `wrangler secret put`):
+//   SUPABASE_URL, SUPABASE_SERVICE_KEY, MCP_SECRET
+
+const SERVER_INFO = { name: 'sticker-art-crm', version: '1.0.0' };
+
+export default {
+  async fetch(req, env) {
+    const url = new URL(req.url);
+    if (url.pathname.startsWith('/mcp')) return handleMcp(req, env, url);
+    return env.ASSETS.fetch(req);
+  },
+};
+
+// ---------- Supabase REST helper ----------
+async function db(env, path, { method = 'GET', body, prefer } = {}) {
+  const r = await fetch(`${env.SUPABASE_URL}/rest/v1/${path}`, {
+    method,
+    headers: {
+      apikey: env.SUPABASE_SERVICE_KEY, Authorization: `Bearer ${env.SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json', Prefer: prefer || 'return=representation',
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const txt = await r.text();
+  if (!r.ok) throw new Error(`Database error ${r.status}: ${txt}`);
+  return txt ? JSON.parse(txt) : null;
+}
+const enc = encodeURIComponent;
+const clean = (s) => String(s).replace(/[%,()*]/g, ' ').trim();
+const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
+
+async function findStore(env, ref) {
+  if (!ref) throw new Error('store is required (id, slug or name)');
+  if (/^[0-9a-f-]{36}$/.test(ref)) { const r = await db(env, `stores?id=eq.${ref}&select=*`); if (r[0]) return r[0]; }
+  let r = await db(env, `stores?slug=eq.${enc(ref)}&select=*`); if (r[0]) return r[0];
+  r = await db(env, `stores?name=ilike.${enc(clean(ref))}&select=*`); if (r.length === 1) return r[0];
+  r = await db(env, `stores?name=ilike.*${enc(clean(ref))}*&select=id,name,city,state&limit=10`);
+  if (r.length === 1) return (await db(env, `stores?id=eq.${r[0].id}&select=*`))[0];
+  if (!r.length) throw new Error(`No store matches "${ref}". Use search_stores or create_store.`);
+  throw new Error(`"${ref}" matches several stores: ${r.map((x) => `${x.name} (${x.city || ''} ${x.state || ''}, id ${x.id})`).join('; ')}. Pass the id.`);
+}
+
+// ---------- tools ----------
+const STORE_FIELDS = {
+  name: { type: 'string' }, city: { type: 'string' }, state: { type: 'string' }, address: { type: 'string' },
+  email: { type: 'string' }, phone: { type: 'string' }, website: { type: 'string' },
+  channel: { type: 'string', enum: ['faire', 'direct', 'both', 'prospect'] },
+  account_status: { type: 'string', enum: ['Active', 'Overdue', 'Lapsed', 'Dormant', 'Closed'] },
+  status: { type: 'string', enum: ['not-contacted', 'contacted', 'replied', 'ordered', 'seasonal-hold', 'sample-hold', 'skip'] },
+  key_account: { type: 'boolean' }, holdout: { type: 'boolean' }, tags: { type: 'array', items: { type: 'string' } },
+  background: { type: 'string' }, next_follow_up: { type: 'string', description: 'YYYY-MM-DD' }, pause_until: { type: 'string', description: 'YYYY-MM-DD' },
+};
+const pick = (o, keys) => Object.fromEntries(Object.entries(o).filter(([k, v]) => keys.includes(k) && v !== undefined));
+
+const TOOLS = [
+  {
+    name: 'search_stores',
+    description: 'Find stores by name, city, email or background text, with optional filters (channel, account status, outreach status, tag, state, key account, holdout, follow-up due). Returns a short list.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string' }, channel: STORE_FIELDS.channel, account_status: STORE_FIELDS.account_status, status: STORE_FIELDS.status,
+      tag: { type: 'string' }, state: { type: 'string' }, key_account: { type: 'boolean' }, holdout: { type: 'boolean' },
+      follow_up_due: { type: 'boolean', description: 'Only stores whose next follow-up is today or earlier' }, limit: { type: 'number' } } },
+    async run(env, a) {
+      const f = ['select=id,slug,name,city,state,channel,account_status,status,key_account,holdout,tags,last_contact,next_follow_up,last_order'];
+      if (a.query) { const q = enc(clean(a.query)); f.push(`or=(name.ilike.*${q}*,city.ilike.*${q}*,email.ilike.*${q}*,background.ilike.*${q}*)`); }
+      if (a.channel) f.push(`channel=eq.${a.channel}`);
+      if (a.account_status) f.push(`account_status=eq.${a.account_status}`);
+      if (a.status) f.push(`status=eq.${a.status}`);
+      if (a.tag) f.push(`tags=cs.{${enc('"' + a.tag + '"')}}`);
+      if (a.state) f.push(`state=ilike.${enc(a.state)}`);
+      if (a.key_account != null) f.push(`key_account=is.${a.key_account}`);
+      if (a.holdout != null) f.push(`holdout=is.${a.holdout}`);
+      if (a.follow_up_due) f.push(`next_follow_up=lte.${today()}`);
+      f.push(`order=name`, `limit=${Math.min(a.limit || 25, 200)}`);
+      return db(env, `stores?${f.join('&')}`);
+    },
+  },
+  {
+    name: 'get_store',
+    description: 'Get one store with its people, open tasks, orders and recent timeline (notes, emails, calls, Faire messages, orders). Read this before contacting a store.',
+    inputSchema: { type: 'object', properties: { store: { type: 'string', description: 'Store id, slug or exact/partial name' }, timeline_limit: { type: 'number' } }, required: ['store'] },
+    async run(env, a) {
+      const s = await findStore(env, a.store);
+      const [contacts, tasks, orders, timeline] = await Promise.all([
+        db(env, `contacts?store_id=eq.${s.id}&select=id,name,title,email,phone,background`),
+        db(env, `tasks?store_id=eq.${s.id}&done_at=is.null&select=id,title,category,due_date&order=due_date`),
+        db(env, `orders?store_id=eq.${s.id}&select=channel,order_no,ordered_at,total&order=ordered_at.desc&limit=50`),
+        db(env, `timeline?store_id=eq.${s.id}&select=id,kind,occurred_at,author,subject,body,source&order=occurred_at.desc&limit=${Math.min(a.timeline_limit || 40, 500)}`),
+      ]);
+      return { store: s, contacts, open_tasks: tasks, orders, timeline };
+    },
+  },
+  {
+    name: 'log_activity',
+    description: 'Add an entry to a store\'s timeline (note, email, call, Faire message, mail). Optionally sets the next follow-up date and marks the store as contacted. Use after every outreach or reply.',
+    inputSchema: { type: 'object', properties: {
+      store: { type: 'string' }, kind: { type: 'string', enum: ['note', 'email', 'call', 'faire', 'mail', 'system'] },
+      subject: { type: 'string' }, body: { type: 'string' }, occurred_at: { type: 'string', description: 'ISO date/time; defaults to now' },
+      author: { type: 'string', description: 'Who did it, e.g. Bryant, Claude, faire-daily. Defaults to Claude' },
+      counts_as_contact: { type: 'boolean', description: 'Update last contact date (default true for email/call/faire/mail)' },
+      next_follow_up: { type: 'string', description: 'YYYY-MM-DD' }, status: STORE_FIELDS.status,
+      contact_name: { type: 'string', description: 'Person at the store this was with (optional)' },
+      source_id: { type: 'string', description: 'Optional unique id (e.g. gmail:<message id>) so the same item is never logged twice' } },
+      required: ['store', 'kind', 'body'] },
+    async run(env, a) {
+      const s = await findStore(env, a.store);
+      const when = a.occurred_at ? new Date(a.occurred_at).toISOString() : new Date().toISOString();
+      let contact_id = null;
+      if (a.contact_name) { const c = await db(env, `contacts?store_id=eq.${s.id}&name=ilike.*${enc(clean(a.contact_name))}*&select=id&limit=1`); contact_id = c[0]?.id || null; }
+      const row = { store_id: s.id, contact_id, kind: a.kind, subject: a.subject || null, body: a.body, occurred_at: when, author: a.author || 'Claude', source: 'claude', source_id: a.source_id || null };
+      const ins = await db(env, `timeline${a.source_id ? '?on_conflict=source_id' : ''}`, { method: 'POST', body: row, prefer: a.source_id ? 'return=representation,resolution=ignore-duplicates' : undefined });
+      const upd = {};
+      const contact = a.counts_as_contact ?? ['email', 'call', 'faire', 'mail'].includes(a.kind);
+      if (contact && (!s.last_contact || when.slice(0, 10) >= s.last_contact)) upd.last_contact = when.slice(0, 10);
+      if (a.status) upd.status = a.status; else if (contact && (!s.status || s.status === 'not-contacted')) upd.status = 'contacted';
+      if (a.next_follow_up) upd.next_follow_up = a.next_follow_up;
+      if (Object.keys(upd).length) await db(env, `stores?id=eq.${s.id}`, { method: 'PATCH', body: upd });
+      return { logged: ins?.[0] || 'already logged', store: s.name, store_updates: upd };
+    },
+  },
+  {
+    name: 'list_due',
+    description: 'What needs doing: open tasks due by a date (default today, America/Denver) and stores whose follow-up date has arrived.',
+    inputSchema: { type: 'object', properties: { through: { type: 'string', description: 'YYYY-MM-DD, default today' } } },
+    async run(env, a) {
+      const d = a.through || today();
+      const [tasks, stores] = await Promise.all([
+        db(env, `tasks?done_at=is.null&due_date=lte.${d}&select=id,title,category,due_date,store_id,stores(name)&order=due_date&limit=300`),
+        db(env, `stores?next_follow_up=lte.${d}&select=id,name,city,state,channel,status,key_account,next_follow_up,last_contact&order=next_follow_up&limit=300`),
+      ]);
+      return { through: d, tasks, follow_ups: stores };
+    },
+  },
+  {
+    name: 'create_task',
+    description: 'Create a task (optionally on a store) with a due date.',
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, title: { type: 'string' }, due_date: { type: 'string', description: 'YYYY-MM-DD' }, category: { type: 'string', description: 'Follow-up, Email, Call, Ship, Sample, Meeting, Thank-you' } }, required: ['title'] },
+    async run(env, a) {
+      const s = a.store ? await findStore(env, a.store) : null;
+      return db(env, 'tasks', { method: 'POST', body: { store_id: s?.id || null, title: a.title, due_date: a.due_date || null, category: a.category || 'Follow-up', source: 'claude' } });
+    },
+  },
+  {
+    name: 'update_task',
+    description: 'Complete, reopen, reschedule or rename a task by id.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string' }, done: { type: 'boolean' }, due_date: { type: 'string' }, title: { type: 'string' } }, required: ['id'] },
+    async run(env, a) {
+      const upd = {};
+      if (a.done != null) upd.done_at = a.done ? new Date().toISOString() : null;
+      if (a.due_date) upd.due_date = a.due_date;
+      if (a.title) upd.title = a.title;
+      const r = await db(env, `tasks?id=eq.${a.id}`, { method: 'PATCH', body: upd });
+      if (a.done && r[0]?.store_id) await db(env, 'timeline?on_conflict=source_id', { method: 'POST', prefer: 'return=minimal,resolution=ignore-duplicates',
+        body: { store_id: r[0].store_id, kind: 'task', subject: 'Task done: ' + r[0].title, author: 'Claude', source: 'claude', source_id: 'taskdone:' + a.id } });
+      return r;
+    },
+  },
+  {
+    name: 'create_store',
+    description: 'Add a new store (search first so you do not create a duplicate).',
+    inputSchema: { type: 'object', properties: STORE_FIELDS, required: ['name'] },
+    async run(env, a) {
+      const slug = a.name.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      const exists = await db(env, `stores?slug=eq.${enc(slug)}&select=id`);
+      return db(env, 'stores', { method: 'POST', body: { ...pick(a, Object.keys(STORE_FIELDS)), slug: exists.length ? `${slug}-${Date.now().toString(36).slice(-4)}` : slug } });
+    },
+  },
+  {
+    name: 'update_store',
+    description: 'Change a store\'s fields: status, account status, channel, follow-up date, tags, key account, holdout, contact info, background.',
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, ...STORE_FIELDS, add_tags: { type: 'array', items: { type: 'string' } }, remove_tags: { type: 'array', items: { type: 'string' } } }, required: ['store'] },
+    async run(env, a) {
+      const s = await findStore(env, a.store);
+      const upd = pick(a, Object.keys(STORE_FIELDS));
+      if (a.add_tags || a.remove_tags) {
+        const t = new Set(upd.tags || s.tags || []);
+        (a.add_tags || []).forEach((x) => t.add(x)); (a.remove_tags || []).forEach((x) => t.delete(x));
+        upd.tags = [...t];
+      }
+      return db(env, `stores?id=eq.${s.id}`, { method: 'PATCH', body: upd });
+    },
+  },
+  {
+    name: 'add_contact',
+    description: 'Add or update a person at a store (matched by email or name).',
+    inputSchema: { type: 'object', properties: { store: { type: 'string' }, name: { type: 'string' }, title: { type: 'string' }, email: { type: 'string' }, phone: { type: 'string' }, background: { type: 'string' } }, required: ['store', 'name'] },
+    async run(env, a) {
+      const s = await findStore(env, a.store);
+      const rec = pick(a, ['name', 'title', 'email', 'phone', 'background']);
+      const q = a.email ? `email=ilike.${enc(a.email)}` : `name=ilike.${enc(clean(a.name))}`;
+      const ex = await db(env, `contacts?store_id=eq.${s.id}&${q}&select=id`);
+      return ex[0] ? db(env, `contacts?id=eq.${ex[0].id}`, { method: 'PATCH', body: rec }) : db(env, 'contacts', { method: 'POST', body: { ...rec, store_id: s.id } });
+    },
+  },
+  {
+    name: 'record_order',
+    description: 'Record a Shopify or Faire order (idempotent on channel + order number). Matches the store by store ref, customer email or name; it shows on the store timeline automatically.',
+    inputSchema: { type: 'object', properties: {
+      channel: { type: 'string', enum: ['shopify', 'faire'] }, order_no: { type: 'string' }, ordered_at: { type: 'string' }, total: { type: 'number' },
+      status: { type: 'string' }, customer_name: { type: 'string' }, customer_email: { type: 'string' }, store: { type: 'string', description: 'Store id/slug/name if known' },
+      items: { type: 'array', items: { type: 'object' } } }, required: ['channel', 'order_no', 'ordered_at'] },
+    async run(env, a) {
+      let s = null;
+      try { if (a.store) s = await findStore(env, a.store); } catch (e) { /* fall through */ }
+      if (!s && a.customer_email) { const r = await db(env, `stores?email=ilike.${enc(a.customer_email)}&select=id,name&limit=2`); if (r.length === 1) s = r[0];
+        if (!s) { const c = await db(env, `contacts?email=ilike.${enc(a.customer_email)}&select=store_id&limit=2`); if (c.length === 1 && c[0].store_id) s = { id: c[0].store_id }; } }
+      if (!s && a.customer_name) { try { s = await findStore(env, a.customer_name); } catch (e) { /* unmatched */ } }
+      const row = { channel: a.channel, order_no: a.order_no, ordered_at: new Date(a.ordered_at).toISOString(), total: a.total ?? null, status: a.status || null,
+        customer_name: a.customer_name || null, customer_email: a.customer_email || null, items: a.items || [], store_id: s?.id || null, source_id: `${a.channel}:${a.order_no}` };
+      const r = await db(env, 'orders?on_conflict=source_id', { method: 'POST', body: row, prefer: 'return=representation,resolution=merge-duplicates' });
+      return { order: r[0], matched_store: s?.id ? true : false };
+    },
+  },
+  {
+    name: 'search_timeline',
+    description: 'Full-text search across all notes, emails and messages in every store\'s timeline.',
+    inputSchema: { type: 'object', properties: { query: { type: 'string' }, since: { type: 'string', description: 'YYYY-MM-DD' }, limit: { type: 'number' } }, required: ['query'] },
+    async run(env, a) {
+      const q = enc(clean(a.query));
+      return db(env, `timeline?or=(body.ilike.*${q}*,subject.ilike.*${q}*)${a.since ? `&occurred_at=gte.${a.since}` : ''}&select=id,kind,occurred_at,author,subject,body,store_id,stores(name)&order=occurred_at.desc&limit=${Math.min(a.limit || 25, 100)}`);
+    },
+  },
+  {
+    name: 'recent_activity',
+    description: 'Latest timeline entries across all stores (what happened lately), optionally since a date or by author.',
+    inputSchema: { type: 'object', properties: { since: { type: 'string' }, author: { type: 'string' }, limit: { type: 'number' } } },
+    async run(env, a) {
+      return db(env, `timeline?select=kind,occurred_at,author,subject,body,store_id,stores(name)${a.since ? `&occurred_at=gte.${a.since}` : ''}${a.author ? `&author=ilike.${enc(a.author)}` : ''}&order=occurred_at.desc&limit=${Math.min(a.limit || 30, 200)}`);
+    },
+  },
+];
+
+// ---------- MCP (Streamable HTTP, JSON responses) ----------
+async function handleMcp(req, env, url) {
+  const secret = url.pathname.split('/')[2] || (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+  if (!env.MCP_SECRET || secret !== env.MCP_SECRET) return new Response('Not found', { status: 404 });
+  if (req.method === 'GET') return new Response('Method not allowed', { status: 405, headers: { Allow: 'POST' } });
+  if (req.method === 'DELETE') return new Response(null, { status: 204 });
+  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+  let msg;
+  try { msg = await req.json(); } catch { return json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }, 400); }
+  const batch = Array.isArray(msg) ? msg : [msg];
+  const out = [];
+  for (const m of batch) { const r = await handleRpc(env, m); if (r) out.push(r); }
+  if (!out.length) return new Response(null, { status: 202 });
+  return json(Array.isArray(msg) ? out : out[0]);
+}
+const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'Content-Type': 'application/json' } });
+
+async function handleRpc(env, m) {
+  if (m.id === undefined || m.id === null) return null; // notification
+  const ok = (result) => ({ jsonrpc: '2.0', id: m.id, result });
+  switch (m.method) {
+    case 'initialize':
+      return ok({ protocolVersion: m.params?.protocolVersion || '2025-06-18', capabilities: { tools: {} }, serverInfo: SERVER_INFO,
+        instructions: 'Sticker Art wholesale CRM: stores (retailers), their people, a timeline of notes/emails/calls/Faire messages/orders, tasks and orders. Read a store with get_store before contacting it; log every outreach or reply with log_activity.' });
+    case 'ping': return ok({});
+    case 'tools/list': return ok({ tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
+    case 'tools/call': {
+      const tool = TOOLS.find((t) => t.name === m.params?.name);
+      if (!tool) return { jsonrpc: '2.0', id: m.id, error: { code: -32602, message: 'Unknown tool' } };
+      try {
+        const r = await tool.run(env, m.params.arguments || {});
+        return ok({ content: [{ type: 'text', text: JSON.stringify(r, null, 1) }] });
+      } catch (e) {
+        return ok({ content: [{ type: 'text', text: String(e.message || e) }], isError: true });
+      }
+    }
+    default: return { jsonrpc: '2.0', id: m.id, error: { code: -32601, message: 'Method not found' } };
+  }
+}
