@@ -41,6 +41,11 @@ const enc = encodeURIComponent;
 const clean = (s) => String(s).replace(/[%,()*]/g, ' ').trim();
 // escape text for a LIKE pattern, and build an "or" filter matching it in any of cols (quoted so commas/parentheses work)
 const likeEsc = (q) => String(q).trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' ');
+const STOP = new Set(['the', 'and', 'of', 'a', '&', 'inc', 'llc', 'co']);
+const qWords = (q) => String(q).toLowerCase().split(/[\s,/&+-]+/).filter((w) => w && !STOP.has(w)).map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
+// every word must match one of the columns: and=(or(...),or(...))
+const wordIlike = (cols, q) => { const W = qWords(q); if (W.length < 2) return orIlike(cols, W[0] || q);
+  return 'and=(' + W.map((w) => 'or(' + cols.map((c) => `${c}.ilike.${enc(`"%${likeEsc(w)}%"`)}`).join(',') + ')').join(',') + ')'; };
 const orIlike = (cols, q) => 'or=(' + cols.map((c) => `${c}.ilike.${enc(`"%${likeEsc(q)}%"`)}`).join(',') + ')';
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Denver' });
 
@@ -81,7 +86,7 @@ const TOOLS = [
       archived_only: { type: 'boolean' }, limit: { type: 'number' } } },
     async run(env, a) {
       const f = ['select=id,slug,name,city,state,channel,account_status,status,key_account,holdout,tags,last_contact,next_follow_up,last_order,archived_at'];
-      if (a.query) f.push(orIlike(['name', 'city', 'email', 'background'], a.query));
+      if (a.query) f.push(wordIlike(['name', 'city', 'email', 'background'], a.query));
       if (a.channel) f.push(`channel=eq.${a.channel}`);
       if (a.account_status) f.push(`account_status=eq.${a.account_status}`);
       if (a.status) f.push(`status=eq.${a.status}`);

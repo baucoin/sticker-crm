@@ -13,6 +13,10 @@ const fmtDateTime = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'sho
 const money = (n) => n == null ? '' : '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const localDate = (iso) => new Date(iso).toLocaleDateString('en-CA'); // YYYY-MM-DD in Bryant's time zone, not UTC
 // Build a PostgREST "or" filter that matches text containing q in any of cols (quotes so commas/parentheses work)
+// Word search: every word must appear somewhere (any order), so "grand canyon caverns" finds "Grand Canyon Cavern Inn". Plurals and filler words are loosened.
+const STOP = new Set(['the', 'and', 'of', 'a', '&', 'inc', 'llc', 'co']);
+const words = (q) => q.toLowerCase().split(/[\s,/&+-]+/).filter((w) => w && !STOP.has(w)).map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w));
+const wordSearch = (query, cols, q) => { const W = words(q); if (!W.length) return query.or(orIlike(cols, q)); W.forEach((w) => { query = query.or(orIlike(cols, w)); }); return query; };
 const orIlike = (cols, q) => { const v = q.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' '); return cols.map((c) => `${c}.ilike."%${v}%"`).join(','); };
 let routeSeq = 0;
 const noteDrafts = {}; // half-typed notes per store survive page redraws
@@ -113,7 +117,7 @@ qsInput.addEventListener('input', () => {
   qsTimer = setTimeout(async () => {
     const my = ++qsSeq;
     const [st, ppl] = await Promise.all([
-      sb.from('stores').select('id,name,city,state,archived_at,key_account').or(orIlike(['name', 'city'], q)).order('archived_at', { nullsFirst: true }).order('name').limit(8),
+      wordSearch(sb.from('stores').select('id,name,city,state,archived_at,key_account'), ['name', 'city', 'email'], q).order('archived_at', { nullsFirst: true }).order('name').limit(8),
       sb.from('contacts').select('id,name,email,store_id,stores(name)').or(orIlike(['name', 'email'], q)).limit(4),
     ]);
     if (my !== qsSeq || qsInput.value.trim() !== q) return;
@@ -331,7 +335,7 @@ async function viewStores() {
 
   const sort = p.get('sort') || 'name', dir = p.get('dir') === 'desc', page = +(p.get('page') || 0), per = 100;
   let q = sb.from('store_list').select('id,name,city,state,channel,account_status,status,key_account,holdout,tags,next_follow_up,last_contact,last_order,faire_spend,shopify_spend,next_task_due,archived_at', { count: 'exact' });
-  if (p.get('q')) q = q.or(orIlike(['name', 'city', 'email', 'background'], p.get('q')));
+  if (p.get('q')) q = wordSearch(q, ['name', 'city', 'email', 'background'], p.get('q'));
   if (p.get('channel')) q = q.eq('channel', p.get('channel'));
   if (p.get('account')) q = q.eq('account_status', p.get('account'));
   if (p.get('status')) q = q.eq('status', p.get('status'));
@@ -604,7 +608,7 @@ async function viewStore(id) {
   let relT;
   document.getElementById('relq').oninput = (e) => { clearTimeout(relT); relT = setTimeout(async () => {
     const q = e.target.value.trim(); const box = document.getElementById('relres'); if (q.length < 2) { box.innerHTML = ''; return; }
-    const { data } = await sb.from('stores').select('id,name,city,state,parent_id').or(orIlike(['name', 'city'], q)).neq('id', id).order('name').limit(12);
+    const { data } = await wordSearch(sb.from('stores').select('id,name,city,state,parent_id'), ['name', 'city'], q).neq('id', id).order('name').limit(12);
     box.innerHTML = (data || []).map((r) => `<div class="task"><span>${rl(r)}</span><span class="spacer"></span>
       <button class="link small" data-rel="${r.id}" data-how="child">Is a location of this</button>
       <button class="link small" data-rel="${r.id}" data-how="parent">Is the parent of this</button></div>`).join('') || '<p class="muted small">No matches</p>';
@@ -676,7 +680,7 @@ async function viewSearch(q) {
   const seq = routeSeq;
   document.querySelector('#quicksearch input').value = q;
   const [stores, people, notes] = await Promise.all([
-    sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags,archived_at').or(orIlike(['name', 'city', 'email', 'background'], q)).order('name').limit(50),
+    wordSearch(sb.from('stores').select('id,name,city,state,channel,key_account,holdout,tags,archived_at'), ['name', 'city', 'email', 'background'], q).order('name').limit(50),
     sb.from('contacts').select('id,name,email,store_id,stores(name)').or(orIlike(['name', 'email'], q)).limit(50),
     sb.from('timeline').select('id,kind,occurred_at,subject,body,store_id,stores(name)').or(orIlike(['body', 'subject'], q)).order('occurred_at', { ascending: false }).limit(50),
   ]);
