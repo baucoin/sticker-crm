@@ -107,3 +107,12 @@ button:disabled { opacity: .6; cursor: default; }
 
 .fu-next { padding: 8px 10px; margin: 8px 0; background: var(--bg, #f6f7f9); border-left: 3px solid #2f7d4f; border-radius: 6px; }
 .fu-next input[type=date] { font-size: 12px; padding: 1px 4px; }
+
+.today-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 0.9fr); }
+.today-panel { border: 1px solid var(--accent, #2f7d4f); border-top: 4px solid var(--accent, #2f7d4f); box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+.today-panel h2 { color: var(--accent, #2f7d4f); }
+.col-side .panel { background: transparent; box-shadow: none; }
+.col-side h2, .col-activity h2 { font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+details.panel > summary { cursor: pointer; list-style: revert; }
+@media (max-width: 1100px) { .today-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); } .today-grid > div:first-child { grid-column: auto; } .today-grid > .col-today { grid-column: 1 / -1; order: -1; } }
+@media (max-width: 700px) { .today-grid { grid-template-columns: 1fr; } }

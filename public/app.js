@@ -170,24 +170,24 @@ async function viewToday() {
   if (seq !== routeSeq) return;
   $app.innerHTML = `
   <h1>Today <span class="muted small">${fmtDate(t)}</span></h1>
-  <div class="grid3">
-    <div>
-      <div class="panel"><h2 style="margin-top:0">Tasks due (${tasks.data.length})</h2>
-        ${tasks.data.length ? tasks.data.map(taskRow).join('') : '<p class="muted">Nothing due. Nice.</p>'}
-      </div>
-      <div class="panel"><div class="row"><h2 style="margin:0">Follow-ups due (${follow.data.length})</h2><span class="spacer"></span><a href="#/followups">Next 7 days: ${weekCount} →</a></div>
-        ${follow.data.length ? follow.data.map(followRow).join('') : '<p class="muted">No follow-ups due today.</p>'}
-      </div>
-    </div>
-    <div>
+  <div class="grid3 today-grid">
+    <div class="col-activity">
       <div class="panel"><h2 style="margin-top:0">Latest activity</h2>${recent.data.map((e) => `
         <div class="task"><span><a href="#/store/${e.store_id}">${esc(e.stores?.name || '')}</a> <span class="muted small">${KINDS[e.kind] || e.kind} · ${fmtDate(e.occurred_at)}</span>
         <div class="small">${esc(((e.subject && !/^Outreach Tracker/.test(e.subject) ? e.subject : e.body) || e.subject || '').slice(0, 140))}</div></span></div>`).join('')}</div>
     </div>
-    <div>
-      <div class="panel"><h2 style="margin-top:0">Coming up</h2>${upcoming.data?.length ? upcoming.data.map(taskRow).join('') : '<p class="muted">No upcoming tasks.</p>'}</div>
+    <div class="col-today">
+      <div class="panel today-panel"><h2 style="margin-top:0">Tasks due (${tasks.data.length})</h2>
+        ${tasks.data.length ? tasks.data.map(taskRow).join('') : '<p class="muted">Nothing due. Nice.</p>'}
+      </div>
+      <div class="panel today-panel"><div class="row"><h2 style="margin:0">Follow-ups due (${follow.data.length})</h2><span class="spacer"></span><a href="#/followups">Next 7 days: ${weekCount} →</a></div>
+        ${follow.data.length ? follow.data.map(followRow).join('') : '<p class="muted">No follow-ups due today.</p>'}
+      </div>
+    </div>
+    <div class="col-side">
       <div class="panel"><h2 style="margin-top:0">Latest orders</h2>${ordersRecent.data.map((o) => `
         <div class="task"><span>${o.stores ? `<a href="#/store/${o.stores.id}">${esc(o.stores.name)}</a>` : esc(o.customer_name || '')}<div class="muted small">${esc(o.channel)} ${esc(o.order_no || '')} · ${fmtDate(o.ordered_at)}</div></span><span class="spacer"></span><b>${money(o.total)}</b></div>`).join('') || '<p class="muted">None yet.</p>'}</div>
+      <details class="panel"><summary><h2 style="display:inline;margin:0">Coming up</h2></summary>${upcoming.data?.length ? upcoming.data.map(taskRow).join('') : '<p class="muted">No upcoming tasks.</p>'}</details>
     </div>
   </div>`;
   bindTaskRows(); bindFollowRows(viewToday);
