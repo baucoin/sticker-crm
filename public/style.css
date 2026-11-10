@@ -104,3 +104,6 @@ button:disabled { opacity: .6; cursor: default; }
 .qs-drop a:last-child { border-bottom: 0; }
 .qs-drop a:hover, .qs-drop a.on { background: var(--chip); }
 .qs-drop .qs-all { color: var(--accent); font-size: 13px; }
+
+.fu-next { padding: 8px 10px; margin: 8px 0; background: var(--bg, #f6f7f9); border-left: 3px solid #2f7d4f; border-radius: 6px; }
+.fu-next input[type=date] { font-size: 12px; padding: 1px 4px; }

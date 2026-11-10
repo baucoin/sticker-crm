@@ -473,7 +473,6 @@ async function viewStore(id) {
           <dt>Channel</dt><dd>${esc(s.channel || '')}</dd>
           <dt>Account</dt><dd>${esc(s.account_status || '')}</dd>
           <dt>Outreach</dt><dd>${esc(s.status || '')}</dd>
-          <dt>Follow up</dt><dd class="${dueClass(s.next_follow_up)}">${fmtDate(s.next_follow_up) || '—'}</dd>
           ${s.pause_until ? `<dt>Paused until</dt><dd>${fmtDate(s.pause_until)}</dd>` : ''}
           <dt>Last contact</dt><dd>${fmtDate(s.last_contact) || '—'}</dd>
           <dt>Last order</dt><dd>${fmtDate(s.last_order) || '—'}</dd>
@@ -483,6 +482,12 @@ async function viewStore(id) {
         ${Object.keys(ex).length ? `<details class="small" style="margin-top:8px"><summary class="muted">More tracker fields</summary><dl class="kv" style="margin-top:6px">${Object.entries(ex).filter(([, v]) => v !== '' && v != null).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(typeof v === 'object' ? JSON.stringify(v) : v)}</dd>`).join('')}</dl></details>` : ''}
       </div>
       <div class="panel"><div class="row"><h2 style="margin:0">Tasks</h2><span class="spacer"></span><button class="link" id="showdone">${tasks.data.length - openTasks.length} done</button></div>
+        <div class="fu-next">${s.next_follow_up ? `<div class="small muted">Next follow-up</div>
+          <div><b class="${dueClass(s.next_follow_up)}">${fmtDate(s.next_follow_up)}</b>${followReason(s) ? ' · ' + esc(followReason(s)) : ''}</div>
+          <div class="row small" style="margin-top:4px"><button class="link small" data-fuact="week">Move a week later</button>
+            <label class="muted">or pick a date <input type="date" id="fudate" value="${esc(s.next_follow_up)}"></label>
+            <button class="link small" data-fuact="clear">No follow-up</button></div>`
+          : `<div class="small muted">No follow-up scheduled. <label>Set one: <input type="date" id="fudate"></label></div>`}</div>
         <div id="tasklist">${openTasks.map((t) => taskRow(t)).join('') || '<p class="muted small">No open tasks.</p>'}</div>
         <div id="donelist" hidden>${tasks.data.filter((t) => t.done_at).map((t) => taskRow(t)).join('')}</div>
         <form id="addtask" class="row" style="margin-top:8px">
@@ -571,6 +576,9 @@ async function viewStore(id) {
   };
   document.getElementById('showdone').onclick = () => { const d = document.getElementById('donelist'); d.hidden = !d.hidden; };
   bindTaskRows(() => viewStore(id));
+  const setFu = async (d) => { fail((await sb.from('stores').update({ next_follow_up: d }).eq('id', id)).error); toast(d ? 'Follow-up set for ' + fmtDate(d) : 'Follow-up cleared'); viewStore(id); };
+  document.querySelectorAll('[data-fuact]').forEach((b) => (b.onclick = () => setFu(b.dataset.fuact === 'clear' ? null : addDays(s.next_follow_up > today() ? s.next_follow_up : today(), 7))));
+  const fud = document.getElementById('fudate'); if (fud) fud.onchange = () => fud.value && setFu(fud.value);
 
   document.getElementById('editbtn').onclick = () => {
     const p = document.getElementById('infopanel');
