@@ -347,7 +347,7 @@ async function handleApi(req, env, url) {
 }
 
 // ---------- Public wholesale inquiry form ----------
-// POST /inquiry from the wholesale landing page (stickerart.com/pages/wholesale-purchasing or /wholesale on this site).
+// POST /inquiry: a copy of each application from the wholesale form on stickerart.com/pages/wholesale-purchasing.
 // Accepts form fields (name, email, store, phone, address, website, tax_id, store_type, message) as urlencoded/multipart or JSON.
 // Shopify-style names (contact[name], contact[Store name], ...) work too. Matches or creates the store, adds the person,
 // logs the inquiry on the store timeline and adds a "Reply to wholesale inquiry" task due today.
@@ -371,13 +371,26 @@ async function handleInquiry(req, env, url) {
     else for (const [k, v] of new URLSearchParams(await req.text())) raw[k] = v;
   } catch { raw = {}; }
   const f = {};
-  for (const [key, names] of Object.entries(INQUIRY_ALIASES)) { const n = names.find((x) => raw[x] != null && String(raw[x]).trim() !== ''); f[key] = n ? String(raw[n]).trim().slice(0, key === 'message' ? 3000 : 300) : ''; }
+  const used = new Set();
+  for (const [key, names] of Object.entries(INQUIRY_ALIASES)) { const n = names.find((x) => raw[x] != null && String(raw[x]).trim() !== ''); if (n) used.add(n); f[key] = n ? String(raw[n]).trim().slice(0, key === 'message' ? 3000 : 300) : ''; }
+  // forms with other field labels (e.g. contact[Company], contact[Business name]): guess by label words
+  const GUESS = [['store', /store.?name|company|business|shop.?name/i], ['address', /address|street/i], ['city', /\bcity\b/i], ['state', /\bstate\b/i], ['phone', /phone|tel/i],
+    ['website', /website|web.?site|instagram|url/i], ['tax_id', /tax|resale|ein|seller/i], ['store_type', /type|kind/i], ['email', /e-?mail/i], ['name', /name/i], ['message', /body|message|comment|note/i]];
+  const extra = [];
+  for (const [k, v] of Object.entries(raw)) {
+    const val = String(v).trim();
+    if (used.has(k) || !val || /^(form_type|utf8|contact\[tags\]|g-recaptcha|h-captcha|authenticity_token|company_fax|return_to)/i.test(k)) continue;
+    const label = k.replace(/^contact\[(.*)\]$/, '$1');
+    const g = GUESS.find(([key, re]) => re.test(label) && !f[key]);
+    if (g) { f[g[0]] = val.slice(0, g[0] === 'message' ? 3000 : 300); used.add(k); } else extra.push([label, val.slice(0, 500)]);
+  }
   const wantsJson = (req.headers.get('Accept') || '').includes('json');
-  const back = /^https:\/\/([a-z0-9-]+\.)*(stickerart\.com|stickerartwholesale\.com|workers\.dev)\//i.test(f.back) ? f.back : `${url.origin}/wholesale`;
+  const back = /^https:\/\/([a-z0-9-]+\.)*(stickerart\.com|stickerartwholesale\.com|workers\.dev)\//i.test(f.back) ? f.back : 'https://stickerart.com/pages/wholesale-purchasing';
   const done = (ok, error) => wantsJson
     ? new Response(JSON.stringify(ok ? { ok: true } : { ok: false, error }), { status: ok ? 200 : 400, headers: { ...cors, 'Content-Type': 'application/json' } })
     : Response.redirect(`${back.split('#')[0].split('?')[0]}?inquiry=${ok ? 'thanks' : 'error'}#apply`, 303);
   if (f.trap) return done(true); // bot filled the hidden field
+  if (!f.store && f.name) f.store = `${f.name} (store name not given)`;
   if (!f.name || !f.store || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(f.email)) return done(false, 'Please include your name, email and store name.');
   try {
     // find the store: same person email, same store email, or same store name
@@ -405,7 +418,7 @@ async function handleInquiry(req, env, url) {
     const person = { name: f.name, email: f.email, ...(f.phone ? { phone: f.phone } : {}) };
     const contact = ex[0] ? (await db(env, `contacts?id=eq.${ex[0].id}`, { method: 'PATCH', body: person }))[0] : (await db(env, 'contacts', { method: 'POST', body: { ...person, store_id: store.id } }))[0];
     const lines = [['Name', f.name], ['Email', f.email], ['Phone', f.phone], ['Store', f.store], ['Address', [f.address, f.city, f.state].filter(Boolean).join(', ')],
-      ['Website', f.website], ['Resale tax ID', f.tax_id], ['Store type', f.store_type], ['Message', f.message]].filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`);
+      ['Website', f.website], ['Resale tax ID', f.tax_id], ['Store type', f.store_type], ['Message', f.message], ...extra].filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`);
     const sid = `inquiry:${f.email.toLowerCase()}:${day}`;
     await db(env, 'timeline?on_conflict=source_id', { method: 'POST', prefer: 'return=minimal,resolution=ignore-duplicates',
       body: { store_id: store.id, contact_id: contact?.id || null, kind: 'email', subject: 'Wholesale inquiry from the website form', body: lines.join('\n'), occurred_at: new Date().toISOString(), author: f.name, source: 'web-form', source_id: sid } });
