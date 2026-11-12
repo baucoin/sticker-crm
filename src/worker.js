@@ -228,21 +228,41 @@ const TOOLS = [
   },
   {
     name: 'record_order',
-    description: 'Record a Shopify or Faire order (idempotent on channel + order number). Matches the store by store ref, customer email or name; it shows on the store timeline automatically.',
+    description: 'Record a Shopify or Faire order (idempotent on channel + order number). Matches the store by store id/slug, customer email, or a name only when exactly one store has that name. Chains and Faire \"NOT PROVIDED\" buyers are never auto-matched: matched_store:false comes back with candidates, so look up the ship-to city (Faire order email / Shopify shippingAddress) and call again with store=<id>. For NOT PROVIDED with no store in that city, use store=faire-buyer-name-not-provided and customer_name \"NOT PROVIDED - City, ST\". Calling again with the same order number re-files it.',
     inputSchema: { type: 'object', properties: {
       channel: { type: 'string', enum: ['shopify', 'faire'] }, order_no: { type: 'string' }, ordered_at: { type: 'string' }, total: { type: 'number' },
       status: { type: 'string' }, customer_name: { type: 'string' }, customer_email: { type: 'string' }, store: { type: 'string', description: 'Store id/slug/name if known' },
       items: { type: 'array', items: { type: 'object' } } }, required: ['channel', 'order_no', 'ordered_at'] },
     async run(env, a) {
-      let s = null;
-      try { if (a.store) s = await findStore(env, a.store); } catch (e) { /* fall through */ }
-      if (!s && a.customer_email) { const r = await db(env, `stores?email=ilike.${enc(a.customer_email)}&select=id,name&limit=2`); if (r.length === 1) s = r[0];
+      // Name matching is strict here: chains (REI, The UPS Store) and Faire "NOT PROVIDED" buyers share names,
+      // so a name only matches when exactly one store has it. Otherwise return candidates and let the caller
+      // pick by ship-to city and pass store=<id>.
+      let s = null; let candidates = []; let reason = '';
+      const notProvided = (v) => /not\s*provided/i.test(String(v || ''));
+      const byName = async (name) => {
+        if (notProvided(name)) { reason = 'Buyer name is NOT PROVIDED: look up the ship-to city and pass store=<id> (or the faire-buyer-name-not-provided store if none in that city).'; return null; }
+        const pat = String(name).trim().replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_').replace(/\*/g, ' ');
+        const exact = await db(env, `stores?name=ilike.${enc(pat)}&select=id,name,city,state&limit=10`);
+        const like = await db(env, `stores?name=ilike.${enc('%' + pat + '%')}&select=id,name,city,state&limit=10`);
+        if (exact.length === 1 && like.length === 1) return exact[0];
+        if (!exact.length && like.length === 1) return like[0];
+        if (exact.length > 1 || like.length > 1) { candidates = exact.length > 1 ? exact : like; reason = `Several stores share the name "${name}": check the ship-to city and pass store=<id>.`; }
+        return null;
+      };
+      if (a.store) {
+        if (/^[0-9a-f-]{36}$/.test(a.store)) s = (await db(env, `stores?id=eq.${a.store}&select=id,name`))[0] || null;
+        if (!s) s = (await db(env, `stores?slug=eq.${enc(a.store)}&select=id,name`))[0] || null;
+        if (!s) s = await byName(a.store);
+      }
+      if (!s && !candidates.length && a.customer_email) { const r = await db(env, `stores?email=ilike.${enc(a.customer_email)}&select=id,name&limit=2`); if (r.length === 1) s = r[0];
         if (!s) { const c = await db(env, `contacts?email=ilike.${enc(a.customer_email)}&select=store_id&limit=2`); if (c.length === 1 && c[0].store_id) s = { id: c[0].store_id }; } }
-      if (!s && a.customer_name) { try { s = await findStore(env, a.customer_name); } catch (e) { /* unmatched */ } }
+      if (!s && !candidates.length && a.customer_name) s = await byName(a.customer_name);
       const row = { channel: a.channel, order_no: a.order_no, ordered_at: new Date(a.ordered_at).toISOString(), total: a.total ?? null, status: a.status || null,
-        customer_name: a.customer_name || null, customer_email: a.customer_email || null, items: a.items || [], store_id: s?.id || null, source_id: `${a.channel}:${a.order_no}` };
+        customer_name: a.customer_name || null, customer_email: a.customer_email || null, items: a.items || [], source_id: `${a.channel}:${a.order_no}` };
+      if (s?.id) row.store_id = s.id; // unmatched re-sends never wipe a store already set on the order
+      if (!s?.id && notProvided(a.customer_name)) delete row.customer_name; // keep a "NOT PROVIDED - City, ST" label already saved
       const r = await db(env, 'orders?on_conflict=source_id', { method: 'POST', body: row, prefer: 'return=representation,resolution=merge-duplicates' });
-      return { order: r[0], matched_store: s?.id ? true : false };
+      return s?.id || r[0]?.store_id ? { order: r[0], matched_store: true, ...(s?.id ? {} : { note: 'Kept the store already on this order.' }) } : { order: r[0], matched_store: false, reason: reason || 'No store matched. Use search_stores or create_store, then call record_order again with store=<id>.', candidates };
     },
   },
   {
