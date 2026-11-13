@@ -252,10 +252,10 @@ const TOOLS = [
       if (a.store) {
         if (/^[0-9a-f-]{36}$/.test(a.store)) s = (await db(env, `stores?id=eq.${a.store}&select=id,name`))[0] || null;
         if (!s) s = (await db(env, `stores?slug=eq.${enc(a.store)}&select=id,name`))[0] || null;
-        if (!s) s = await byName(a.store);
       }
-      if (!s && !candidates.length && a.customer_email) { const r = await db(env, `stores?email=ilike.${enc(a.customer_email)}&select=id,name&limit=2`); if (r.length === 1) s = r[0];
+      if (!s && a.customer_email) { /* email beats name: it tells chain locations apart */ const r = await db(env, `stores?email=ilike.${enc(a.customer_email)}&select=id,name&limit=2`); if (r.length === 1) s = r[0];
         if (!s) { const c = await db(env, `contacts?email=ilike.${enc(a.customer_email)}&select=store_id&limit=2`); if (c.length === 1 && c[0].store_id) s = { id: c[0].store_id }; } }
+      if (!s && a.store && !/^[0-9a-f-]{36}$/.test(a.store)) s = await byName(a.store);
       if (!s && !candidates.length && a.customer_name) s = await byName(a.customer_name);
       const row = { channel: a.channel, order_no: a.order_no, ordered_at: new Date(a.ordered_at).toISOString(), total: a.total ?? null, status: a.status || null,
         customer_name: a.customer_name || null, customer_email: a.customer_email || null, items: a.items || [], source_id: `${a.channel}:${a.order_no}` };
